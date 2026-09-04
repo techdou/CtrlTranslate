@@ -1,0 +1,177 @@
+"""全局主题：深/浅两套 QSS。克制用色：单一强调色，无渐变，阴影只用于浮层。"""
+
+from __future__ import annotations
+
+DARK = {
+    "name": "dark",
+    "bg": "#1C1D22",
+    "panel": "#24252C",
+    "panel2": "#2B2D35",
+    "text": "#E8E6E3",
+    "text_dim": "#9A9AA3",
+    "accent": "#4DB6AC",
+    "accent_hover": "#5BC4BA",
+    "accent_text": "#0E2B28",
+    "border": "#35373F",
+    "error": "#E57373",
+    "source_bg": "#202127",
+}
+
+LIGHT = {
+    "name": "light",
+    "bg": "#F6F5F1",
+    "panel": "#FFFFFF",
+    "panel2": "#EFEEE9",
+    "text": "#26272B",
+    "text_dim": "#66676F",
+    "accent": "#0F766E",
+    "accent_hover": "#0D5F59",
+    "accent_text": "#FFFFFF",
+    "border": "#DFDED8",
+    "error": "#C62828",
+    "source_bg": "#F1F0EB",
+}
+
+THEMES = {"dark": DARK, "light": LIGHT}
+
+
+def palette(name: str) -> dict:
+    return THEMES.get(name, DARK)
+
+
+def build_qss(p: dict) -> str:
+    return f"""
+    QWidget {{
+        background: {p['bg']};
+        color: {p['text']};
+        font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+    }}
+    QMainWindow, QDialog {{
+        background: {p['bg']};
+    }}
+    QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox, QComboBox {{
+        background: {p['panel']};
+        border: 1px solid {p['border']};
+        border-radius: 6px;
+        padding: 5px 8px;
+        selection-background-color: {p['accent']};
+    }}
+    QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus, QComboBox:focus {{
+        border-color: {p['accent']};
+    }}
+    QComboBox::drop-down {{ border: none; width: 22px; }}
+    QComboBox QAbstractItemView {{
+        background: {p['panel']};
+        border: 1px solid {p['border']};
+        selection-background-color: {p['panel2']};
+    }}
+    QPushButton {{
+        background: {p['panel']};
+        border: 1px solid {p['border']};
+        border-radius: 6px;
+        padding: 6px 16px;
+    }}
+    QPushButton:hover {{ border-color: {p['accent']}; color: {p['accent']}; }}
+    QPushButton:focus {{ border-color: {p['accent']}; }}
+    QPushButton:pressed {{ background: {p['panel2']}; }}
+    QPushButton:disabled {{ color: {p['text_dim']}; }}
+    QPushButton:checked {{ border-color: {p['accent']}; color: {p['accent']}; }}
+    QPushButton#primary {{
+        background: {p['accent']};
+        color: {p['accent_text']};
+        border: none;
+        font-weight: 600;
+    }}
+    QPushButton#primary:hover {{ background: {p['accent_hover']}; }}
+    QPushButton#primary:focus {{ border: 2px solid {p['accent_text']}; }}
+    QCheckBox {{ spacing: 8px; }}
+    QCheckBox::indicator {{
+        width: 15px; height: 15px;
+        border: 1px solid {p['border']};
+        border-radius: 3px;
+        background: {p['panel']};
+    }}
+    QCheckBox::indicator:checked {{
+        background: {p['accent']};
+        border-color: {p['accent']};
+    }}
+    QRadioButton {{ spacing: 8px; }}
+    QRadioButton::indicator {{
+        width: 16px; height: 16px;
+        border: 1px solid {p['border']};
+        border-radius: 8px;
+        background: {p['panel']};
+    }}
+    QRadioButton::indicator:checked {{
+        border: 4px solid {p['accent']};
+        background: {p['panel']};
+    }}
+    QSlider::groove:horizontal {{
+        height: 4px; background: {p['border']}; border-radius: 2px;
+    }}
+    QSlider::sub-page:horizontal {{
+        background: {p['accent']}; border-radius: 2px;
+    }}
+    QSlider::handle:horizontal {{
+        width: 14px; height: 14px; margin: -5px 0;
+        border-radius: 7px; background: {p['accent']};
+    }}
+    QScrollBar:vertical {{
+        background: transparent; width: 8px; margin: 0;
+    }}
+    QScrollBar::handle:vertical {{
+        background: {p['border']}; border-radius: 4px; min-height: 24px;
+    }}
+    QScrollBar::handle:vertical:hover {{ background: {p['text_dim']}; }}
+    QScrollBar:horizontal {{
+        background: transparent; height: 8px; margin: 0;
+    }}
+    QScrollBar::handle:horizontal {{
+        background: {p['border']}; border-radius: 4px; min-width: 24px;
+    }}
+    QScrollBar::handle:horizontal:hover {{ background: {p['text_dim']}; }}
+    QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
+    QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
+    QTabWidget::pane {{ border: 1px solid {p['border']}; border-radius: 6px; top: -1px; }}
+    QTabBar::tab {{
+        padding: 7px 18px;
+        border: 1px solid {p['border']};
+        border-bottom: none;
+        border-top-left-radius: 6px; border-top-right-radius: 6px;
+        background: {p['panel2']};
+        margin-right: 3px;
+    }}
+    QTabBar::tab:selected {{ background: {p['panel']}; color: {p['accent']}; }}
+    QListWidget {{
+        background: {p['panel2']};
+        border: none;
+        border-right: 1px solid {p['border']};
+        outline: none;
+    }}
+    QListWidget::item {{ padding: 10px 14px; }}
+    QListWidget::item:selected {{
+        background: {p['panel']}; color: {p['accent']};
+        border-left: 3px solid {p['accent']};
+    }}
+    QTableWidget {{
+        background: {p['panel']};
+        border: 1px solid {p['border']};
+        gridline-color: {p['border']};
+        selection-background-color: {p['panel2']};
+    }}
+    QHeaderView::section {{
+        background: {p['panel2']};
+        border: none;
+        border-bottom: 1px solid {p['border']};
+        padding: 6px;
+    }}
+    QLabel#dim {{ color: {p['text_dim']}; }}
+    QLabel#sectionTitle {{ font-size: 15px; font-weight: 600; }}
+    QScrollArea {{ border: none; }}
+    QToolTip {{
+        background: {p['panel']};
+        color: {p['text']};
+        border: 1px solid {p['border']};
+        padding: 4px;
+    }}
+    """
