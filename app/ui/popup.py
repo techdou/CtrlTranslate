@@ -296,6 +296,14 @@ class TranslatePopup(QWidget):
             return
         self.show_message(f"翻译失败：{message}")
 
+    def on_fallback_started(self, task_id: int) -> None:
+        """主服务失败、备用服务接管：复位占位机制（首个备用 chunk 整体替换
+        主服务可能已输出的半截译文），并提示用户正在切换。"""
+        if task_id != self._task_id:
+            return
+        self._placeholder_active = True
+        self._flash_status("主服务失败，切换备用服务重试…")
+
     # ---------------------------------------------------------------- 按钮
 
     def _toggle_speak(self, lang: str, btn: QPushButton) -> None:

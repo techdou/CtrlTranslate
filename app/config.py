@@ -79,6 +79,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "base_url": PROVIDER_PRESETS["zhipu"]["base_url"],
         "model": PROVIDER_PRESETS["zhipu"]["model"],
         "api_key": "",
+        "fallback": {             # 备用翻译服务：主服务失败时自动重发；三件套留空 = 禁用
+            "base_url": "",
+            "model": "",
+            "api_key": "",
+        },
     },
     "translate": {
         "mode": "study",            # study=译文+术语表 / concise=仅译文
@@ -97,13 +102,19 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "tts": {
         "enabled": True,
-        "engine": "auto",           # auto=先 edge-tts 失败转 SAPI / edge / sapi
+        "engine": "auto",           # auto=先 edge-tts 失败转 SAPI / edge / sapi / custom
         "voice_zh": "zh-CN-XiaoxiaoNeural",
         "voice_en": "en-US-AriaNeural",
-        "rate": "+0%",              # edge-tts 语速格式
+        "rate": "+0%",              # edge-tts 语速格式；custom 引擎自动换算为 speed 0.25-4.0
         "volume": "+0%",
         "auto_play": False,
         "auto_play_what": "source", # source / translated
+        "custom": {                 # engine=custom 时的 OpenAI 兼容 TTS（/audio/speech）
+            "base_url": "",
+            "model": "",
+            "voice": "",
+            "api_key": "",
+        },
     },
     "popup": {
         "theme": "dark",            # dark / light
@@ -167,3 +178,14 @@ def resolve_endpoint(cfg: dict) -> tuple[str, str, str]:
         p.get("api_key") or "",
         p.get("model") or "",
     )
+
+
+def resolve_fallback(cfg: dict) -> tuple[str, str, str]:
+    """备用翻译服务三件套；任一为空即视为未配置（返回空串元组）。"""
+    fb = cfg.get("provider", {}).get("fallback", {})
+    base_url = fb.get("base_url") or ""
+    api_key = fb.get("api_key") or ""
+    model = fb.get("model") or ""
+    if not (base_url and api_key and model):
+        return ("", "", "")
+    return (base_url, api_key, model)

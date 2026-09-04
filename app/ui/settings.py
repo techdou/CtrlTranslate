@@ -160,6 +160,49 @@ class SettingsDialog(QDialog):
         self.ed_prompt.setPlaceholderText("留空使用内置 prompt；可自定义，用 {text} 代表原文")
         self.ed_prompt.setFixedHeight(72)
 
+        # ---- 备用服务（fallback）----
+        fb = p.get("fallback", {})
+
+        self.cb_fb_preset = QComboBox()
+        for key, preset in PROVIDER_PRESETS.items():
+            label = preset["label"] + ("  · 需代理" if preset["needs_proxy"] else "")
+            self.cb_fb_preset.addItem(label, key)
+        self.cb_fb_preset.setCurrentIndex(0)
+        self.cb_fb_preset.currentIndexChanged.connect(self._on_fb_preset_changed)
+
+        self.ed_fb_url = QLineEdit(fb.get("base_url", ""))
+        self.cb_fb_model = QComboBox()
+        self.cb_fb_model.setEditable(True)
+        self.cb_fb_model.addItems(PROVIDER_PRESETS["zhipu"]["models"])
+        self.cb_fb_model.setCurrentText(fb.get("model", ""))
+
+        self.ed_fb_key = QLineEdit(fb.get("api_key", ""))
+        self.ed_fb_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.btn_fb_eye = QPushButton("显示")
+        self.btn_fb_eye.setCheckable(True)
+        self.btn_fb_eye.setFixedWidth(52)
+        self.btn_fb_eye.toggled.connect(
+            lambda on: self.ed_fb_key.setEchoMode(
+                QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password
+            )
+        )
+        fb_key_row = QHBoxLayout()
+        fb_key_row.addWidget(self.ed_fb_key, 1)
+        fb_key_row.addWidget(self.btn_fb_eye)
+
+        self.btn_fb_test = QPushButton("测试备用")
+        self.lbl_fb_test = QLabel("")
+        self.lbl_fb_test.setObjectName("dim")
+        self.btn_fb_test.clicked.connect(self._test_fallback)
+        fb_test_row = QHBoxLayout()
+        fb_test_row.addWidget(self.btn_fb_test)
+        fb_test_row.addWidget(self.lbl_fb_test, 1)
+
+        lbl_fb_hint = QLabel("主服务失败（网络 / 限流 / Key 失效）时自动用备用服务重试；三项填写完整后启用")
+        lbl_fb_hint.setObjectName("dim")
+        fb_head = QLabel("备用服务（可选）")
+        fb_head.setObjectName("sectionTitle")
+
         form.addRow("服务商预设", self.cb_preset)
         form.addRow("API 地址", self.ed_base_url)
         form.addRow("模型", self.cb_model)
@@ -169,10 +212,18 @@ class SettingsDialog(QDialog):
         form.addRow("", self.rb_concise)
         form.addRow("", lbl_mode_hint)
         form.addRow("自定义 Prompt", self.ed_prompt)
+        form.addRow(fb_head)
+        form.addRow("预设（填表模板）", self.cb_fb_preset)
+        form.addRow("备用 API 地址", self.ed_fb_url)
+        form.addRow("备用模型", self.cb_fb_model)
+        form.addRow("备用 API Key", _wrap_h(fb_key_row))
+        form.addRow("", _wrap_h(fb_test_row))
+        form.addRow("", lbl_fb_hint)
         return _scroll(page)
 
     def _page_tts(self) -> QWidget:
         t = self.cfg["tts"]
+        c = t.get("custom", {})
         form, page = self._page("语音播报（TTS）")
 
         self.ck_tts = QCheckBox("启用语音播报")
@@ -182,6 +233,7 @@ class SettingsDialog(QDialog):
         self.cb_engine.addItem("自动（在线优先，失败转系统语音）", "auto")
         self.cb_engine.addItem("仅 edge-tts 在线语音", "edge")
         self.cb_engine.addItem("仅系统语音（离线）", "sapi")
+        self.cb_engine.addItem("自定义（OpenAI 兼容 TTS）", "custom")
         _select_combo(self.cb_engine, t.get("engine", "auto"))
 
         self.cb_voice_zh = QComboBox()
@@ -192,6 +244,27 @@ class SettingsDialog(QDialog):
         self.cb_voice_en.setEditable(True)
         self.cb_voice_en.addItems(VOICE_EN)
         self.cb_voice_en.setCurrentText(t.get("voice_en", VOICE_EN[0]))
+
+        # 自定义 TTS（OpenAI 兼容 /audio/speech）：地址 / 模型 / 音色 / Key
+        self.ed_tts_url = QLineEdit(c.get("base_url", ""))
+        self.ed_tts_url.setPlaceholderText("如 https://api.siliconflow.cn/v1")
+        self.ed_tts_model = QLineEdit(c.get("model", ""))
+        self.ed_tts_model.setPlaceholderText("如 FunAudioLLM/CosyVoice2-0.5B、tts-1")
+        self.ed_tts_voice = QLineEdit(c.get("voice", ""))
+        self.ed_tts_voice.setPlaceholderText("如 alloy（留空 = 服务端默认音色）")
+        self.ed_tts_key = QLineEdit(c.get("api_key", ""))
+        self.ed_tts_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.btn_tts_eye = QPushButton("显示")
+        self.btn_tts_eye.setCheckable(True)
+        self.btn_tts_eye.setFixedWidth(52)
+        self.btn_tts_eye.toggled.connect(
+            lambda on: self.ed_tts_key.setEchoMode(
+                QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password
+            )
+        )
+        tts_key_row = QHBoxLayout()
+        tts_key_row.addWidget(self.ed_tts_key, 1)
+        tts_key_row.addWidget(self.btn_tts_eye)
 
         self.cb_rate = QComboBox()
         self.cb_rate.addItems(RATES)
@@ -204,7 +277,10 @@ class SettingsDialog(QDialog):
         self.cb_autoplay_what.addItem("播报中文译文", "translated")
         _select_combo(self.cb_autoplay_what, t.get("auto_play_what", "source"))
         self.ck_tts.toggled.connect(self._sync_tts_enabled)
+        self.cb_engine.currentIndexChanged.connect(
+            lambda _i: self._sync_engine_fields(form))
         for w in (self.cb_engine, self.cb_voice_zh, self.cb_voice_en, self.cb_rate,
+                  self.ed_tts_url, self.ed_tts_model, self.ed_tts_voice, self.ed_tts_key,
                   self.ck_autoplay, self.cb_autoplay_what):
             w.setEnabled(self.ck_tts.isChecked())
 
@@ -212,15 +288,29 @@ class SettingsDialog(QDialog):
         form.addRow("合成引擎", self.cb_engine)
         form.addRow("中文音色（读译文）", self.cb_voice_zh)
         form.addRow("英文音色（读原文）", self.cb_voice_en)
+        form.addRow("TTS API 地址", self.ed_tts_url)
+        form.addRow("TTS 模型", self.ed_tts_model)
+        form.addRow("TTS 音色", self.ed_tts_voice)
+        form.addRow("TTS API Key", _wrap_h(tts_key_row))
         form.addRow("语速", self.cb_rate)
         form.addRow("", self.ck_autoplay)
         form.addRow("自动播报内容", self.cb_autoplay_what)
+        self._sync_engine_fields(form)  # 按当前引擎初始化显隐
         return _scroll(page)
+
+    def _sync_engine_fields(self, form: QFormLayout) -> None:
+        """custom 引擎显示地址/模型/音色/Key，隐藏 edge 音色；其余引擎反之。"""
+        custom = self.cb_engine.currentData() == "custom"
+        for w in (self.ed_tts_url, self.ed_tts_model, self.ed_tts_voice, self.ed_tts_key):
+            form.setRowVisible(w, custom)
+        for w in (self.cb_voice_zh, self.cb_voice_en):
+            form.setRowVisible(w, not custom)
 
     def _sync_tts_enabled(self) -> None:
         on = self.ck_tts.isChecked()
         for w in (self.cb_engine, self.cb_voice_zh, self.cb_voice_en, self.cb_rate,
-                  self.ck_autoplay, self.cb_autoplay_what):
+                  self.ed_tts_url, self.ed_tts_model, self.ed_tts_voice, self.ed_tts_key,
+                  self.btn_tts_eye, self.ck_autoplay, self.cb_autoplay_what):
             w.setEnabled(on)
 
     def _page_trigger(self) -> QWidget:
@@ -331,6 +421,36 @@ class SettingsDialog(QDialog):
         self.cb_model.addItems(preset["models"] or [])
         self.cb_model.setCurrentText(preset["model"])
 
+    def _on_fb_preset_changed(self, index: int) -> None:
+        preset = PROVIDER_PRESETS.get(self.cb_fb_preset.currentData())
+        if not preset:
+            return
+        self.ed_fb_url.setText(preset["base_url"])
+        self.cb_fb_model.clear()
+        self.cb_fb_model.addItems(preset["models"] or [])
+        self.cb_fb_model.setCurrentText(preset["model"])
+
+    def _test_fallback(self) -> None:
+        endpoint = (
+            self.ed_fb_url.text().strip(),
+            self.ed_fb_key.text().strip(),
+            self.cb_fb_model.currentText().strip(),
+        )
+        self.lbl_fb_test.setText("测试中…")
+        self.btn_fb_test.setEnabled(False)
+
+        def ok(msg):
+            self.lbl_fb_test.setText(msg)
+            self.lbl_fb_test.setStyleSheet(f"color: {palette(self.cfg['popup']['theme'])['accent']}")
+            self.btn_fb_test.setEnabled(True)
+
+        def fail(msg):
+            self.lbl_fb_test.setText(msg)
+            self.lbl_fb_test.setStyleSheet(f"color: {palette(self.cfg['popup']['theme'])['error']}")
+            self.btn_fb_test.setEnabled(True)
+
+        self._translator.test_connection(ok, fail, endpoint=endpoint)
+
     def _test_connection(self) -> None:
         self._collect_into(self.cfg)  # 用当前表单值测试
         self.lbl_test.setText("测试中…")
@@ -363,6 +483,11 @@ class SettingsDialog(QDialog):
         p["base_url"] = self.ed_base_url.text().strip()
         p["model"] = self.cb_model.currentText().strip()
         p["api_key"] = self.ed_api_key.text().strip()
+        p["fallback"] = {
+            "base_url": self.ed_fb_url.text().strip(),
+            "model": self.cb_fb_model.currentText().strip(),
+            "api_key": self.ed_fb_key.text().strip(),
+        }
 
         cfg["translate"]["mode"] = "study" if self.rb_study.isChecked() else "concise"
         cfg["translate"]["custom_prompt"] = self.ed_prompt.toPlainText().strip()
@@ -376,6 +501,12 @@ class SettingsDialog(QDialog):
         t["rate"] = self.cb_rate.currentText()
         t["auto_play"] = self.ck_autoplay.isChecked()
         t["auto_play_what"] = self.cb_autoplay_what.currentData()
+        t["custom"] = {
+            "base_url": self.ed_tts_url.text().strip(),
+            "model": self.ed_tts_model.text().strip(),
+            "voice": self.ed_tts_voice.text().strip(),
+            "api_key": self.ed_tts_key.text().strip(),
+        }
 
         cfg["trigger"]["enabled"] = self.ck_hotkey.isChecked()
         cfg["trigger"]["key"] = self.cb_key.currentData() or "ctrl"

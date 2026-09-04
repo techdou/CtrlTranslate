@@ -198,3 +198,118 @@ def test_missing_api_key_fails_fast(qapp):
     tr.translate("hi")
     assert _spin(qapp, lambda: bool(err))
     assert "API Key" in err[0]
+
+
+# ---------------------------------------------------------------- fallback 主备切换
+
+CFG_FB = {
+    "provider": {
+        "name": "zhipu", "base_url": "https://main/v1", "api_key": "sk-main", "model": "m1",
+        "fallback": {"base_url": "https://fb/v1", "model": "m2", "api_key": "sk-fb"},
+    },
+    "translate": {"mode": "concise", "timeout_s": 5},
+}
+
+
+def _conn_error(msg="connection error"):
+    cls = type("APIConnectionError", (Exception,), {})
+    return cls(msg)
+
+
+def _raise(e: Exception):
+    raise e
+
+
+def _install_routed_openai(routes: dict):
+    """routes: {base_url: callable} —— create 时调用，返回 _Stream 或抛异常。"""
+
+    def openai_ctor(**kw):
+        behavior = routes[kw.get("base_url")]
+
+        class _Completions:
+            def create(self, **_kw):
+                return behavior()
+
+        return types.SimpleNamespace(chat=types.SimpleNamespace(completions=_Completions()))
+
+    mod = types.ModuleType("openai")
+    mod.OpenAI = openai_ctor
+    return mock.patch.dict(sys.modules, {"openai": mod})
+
+
+def test_fallback_used_when_primary_fails(qapp):
+    routes = {
+        "https://main/v1": lambda: _raise(_conn_error()),
+        "https://fb/v1": lambda: _Stream([_Event("备"), _Event("用")]),
+    }
+    with _install_routed_openai(routes):
+        tr = Translator(lambda: CFG_FB)
+        got, final, err, fb = [], [], [], []
+        tr.chunk.connect(lambda s, tid: got.append(s))
+        tr.finished.connect(lambda s, tid: final.append(s))
+        tr.failed.connect(lambda s, tid: err.append(s))
+        tr.fallback_started.connect(lambda tid: fb.append(tid))
+        tr.translate("hello")
+        assert _spin(qapp, lambda: bool(final)), f"no finish; err={err}"
+        assert final[0] == "备用"
+        assert "".join(got) == "备用"  # 主服务半截输出不混入
+        assert len(fb) == 1
+        assert err == []
+
+
+def test_no_fallback_reports_primary_error(qapp):
+    cfg = {"provider": dict(CFG_FB["provider"], fallback={}),
+           "translate": CFG_FB["translate"]}
+    routes = {"https://main/v1": lambda: _raise(_conn_error())}
+    with _install_routed_openai(routes):
+        tr = Translator(lambda: cfg)
+        final, err, fb = [], [], []
+        tr.finished.connect(lambda s, tid: final.append(s))
+        tr.failed.connect(lambda s, tid: err.append(s))
+        tr.fallback_started.connect(lambda tid: fb.append(tid))
+        tr.translate("hello")
+        assert _spin(qapp, lambda: bool(err))
+        assert "无法连接" in err[0]
+        assert final == [] and fb == []
+
+
+def test_fallback_also_fails_reports_both(qapp):
+    routes = {
+        "https://main/v1": lambda: _raise(_conn_error("main down")),
+        "https://fb/v1": lambda: _raise(_conn_error("fb down")),
+    }
+    with _install_routed_openai(routes):
+        tr = Translator(lambda: CFG_FB)
+        final, err = [], []
+        tr.finished.connect(lambda s, tid: final.append(s))
+        tr.failed.connect(lambda s, tid: err.append(s))
+        tr.translate("hello")
+        assert _spin(qapp, lambda: bool(err))
+        assert "主服务失败" in err[0] and "备用服务也失败" in err[0]
+        assert final == []
+
+
+def test_incomplete_fallback_config_ignored(qapp):
+    """备用三件套缺一（如没填 Key）→ 视为未配置，只报主服务错误。"""
+    cfg = {"provider": dict(CFG_FB["provider"],
+                            fallback={"base_url": "https://fb/v1", "model": "m2", "api_key": ""}),
+           "translate": CFG_FB["translate"]}
+    calls = []
+
+    def fb_should_not_be_called():
+        calls.append("fb")
+        return _Stream([_Event("x")])
+
+    routes = {
+        "https://main/v1": lambda: _raise(_conn_error()),
+        "https://fb/v1": fb_should_not_be_called,
+    }
+    with _install_routed_openai(routes):
+        tr = Translator(lambda: cfg)
+        err, fb = [], []
+        tr.failed.connect(lambda s, tid: err.append(s))
+        tr.fallback_started.connect(lambda tid: fb.append(tid))
+        tr.translate("hello")
+        assert _spin(qapp, lambda: bool(err))
+        assert "无法连接" in err[0]
+        assert fb == [] and calls == []

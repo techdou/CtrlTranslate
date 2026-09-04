@@ -93,6 +93,7 @@ class CtrlApp:
         self.translator.chunk.connect(self.popup.on_chunk)
         self.translator.finished.connect(self.on_translated)
         self.translator.failed.connect(self.popup.on_error)
+        self.translator.fallback_started.connect(self.popup.on_fallback_started)
 
         self.tray.settings_requested.connect(self.open_settings)
         self.tray.library_requested.connect(self.open_library)
