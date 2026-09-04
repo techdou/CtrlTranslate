@@ -1,9 +1,12 @@
-"""双击 Ctrl 全局热键。
+"""双击触发全局热键（默认 Ctrl，可换 Alt / Shift）。
 
 DoubleTapDetector 是纯逻辑状态机（不依赖 keyboard 库，可单测）：
 吃 (key_name, is_down) 事件流，在"两次目标键按下间隔 ≤ 阈值且期间无其他
 按键事件"成立时，于目标键**抬起**瞬间确认触发——避免用户还按着 Ctrl 时
 就发起取词（后续要模拟 Ctrl+C，会冲突）。
+
+触发键可配置：键盘钩子始终监听全部按键（feed 内过滤目标键），换键只需
+更新 detector，无需重装钩子。
 """
 
 from __future__ import annotations
@@ -28,6 +31,10 @@ class DoubleTapDetector:
         n = (name or "").lower()
         if "ctrl" in n or "control" in n:
             return "ctrl"
+        if "alt" in n:    # alt / left alt / right alt / alt gr
+            return "alt"
+        if "shift" in n:  # shift / left shift / right shift
+            return "shift"
         return n
 
     def feed(self, key_name: str, is_down: bool) -> bool:
@@ -61,13 +68,21 @@ class HotkeyService(QObject):
 
     triggered = Signal()
 
-    def __init__(self, interval_ms: int = 300, parent: QObject | None = None):
+    def __init__(self, interval_ms: int = 300, key: str = "ctrl", parent: QObject | None = None):
         super().__init__(parent)
-        self.detector = DoubleTapDetector(interval_ms=interval_ms)
+        self.detector = DoubleTapDetector(target_key=key, interval_ms=interval_ms)
         self._hook = None
 
     def set_interval(self, interval_ms: int) -> None:
         self.detector.interval_ms = interval_ms
+
+    def set_key(self, key: str) -> None:
+        """切换触发键：重建状态机（丢弃半截的判定状态），钩子无需重装。"""
+        if self.detector.target_key == key:
+            return
+        self.detector = DoubleTapDetector(
+            target_key=key, interval_ms=self.detector.interval_ms
+        )
 
     def start(self) -> bool:
         if self._hook is not None:

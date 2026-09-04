@@ -187,6 +187,31 @@ class TranslatePopup(QWidget):
         self._task_id = self._translator.translate(source)
         return self._task_id
 
+    def show_result(self, source: str, translated: str) -> None:
+        """历史/生词本回看：直接展示已有译文，不发翻译请求（重试可重新发起）。"""
+        cfg = self._cfg_getter()
+        p = palette(cfg.get("popup", {}).get("theme", "dark"))
+        self._source = source
+        self._translated = translated
+        self._task_id = -1  # 作废进行中的翻译回调
+        self._placeholder_active = False
+        preview = source[:SOURCE_PREVIEW_LIMIT] + ("…" if len(source) > SOURCE_PREVIEW_LIMIT else "")
+        self.source_label.setText(f"原文\n{html.escape(preview)}")
+        self.source_label.setVisible(True)
+        self.result_view.setMinimumHeight(60)  # 清掉上次长译文残留的 minHeight
+        self.result_view.setHtml(_format_result(translated or "（无译文）", p))
+        self._set_status("")
+        self.btn_star.setEnabled(True)
+        for b in (self.btn_speak_source, self.btn_speak_trans, self.btn_star,
+                  self.btn_copy, self.btn_retry):
+            b.setVisible(True)
+
+        self._fit_height()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self._start_auto_close(cfg)
+
     def show_message(self, message: str, error: bool = True) -> None:
         """不发起翻译，仅弹出一条提示（如取词/翻译失败）。"""
         p = palette(self._cfg_getter().get("popup", {}).get("theme", "dark"))

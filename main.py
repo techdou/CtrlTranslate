@@ -58,7 +58,10 @@ class CtrlApp:
         self.translator = Translator(self._cfg)
         self.tts = TTSService(self._cfg)
         self.capture = TextCaptureService(self._cfg)
-        self.hotkey = HotkeyService(interval_ms=int(self.cfg["trigger"]["interval_ms"]))
+        self.hotkey = HotkeyService(
+            interval_ms=int(self.cfg["trigger"]["interval_ms"]),
+            key=self.cfg["trigger"].get("key", "ctrl"),
+        )
         self.popup = TranslatePopup(self._cfg, self.tts, self.translator)
 
         # 会话状态
@@ -68,7 +71,11 @@ class CtrlApp:
         self._settings: SettingsDialog | None = None
 
         # 托盘
-        self.tray = TrayController(load_icon(), enabled=self.cfg["trigger"]["enabled"])
+        self.tray = TrayController(
+            load_icon(),
+            enabled=self.cfg["trigger"]["enabled"],
+            key=self.cfg["trigger"].get("key", "ctrl"),
+        )
         self.tray.set_autostart_checked(autostart_enabled())
         self._wire()
 
@@ -151,7 +158,7 @@ class CtrlApp:
 
     def open_library(self) -> None:
         if self._library is None:
-            self._library = LibraryWindow(theme=self.cfg["popup"]["theme"])
+            self._library = LibraryWindow(theme=self.cfg["popup"]["theme"], popup=self.popup)
         self._library.set_theme(self.cfg["popup"]["theme"])
         self._library.refresh()
         self._library.show()
@@ -165,12 +172,14 @@ class CtrlApp:
         save_config(self.cfg)
 
         self.hotkey.set_interval(int(new_cfg["trigger"]["interval_ms"]))
+        self.hotkey.set_key(new_cfg["trigger"].get("key", "ctrl"))
         enabled = new_cfg["trigger"].get("enabled", True)
         if enabled:
             self.hotkey.start()
         else:
             self.hotkey.stop()
         self.tray.set_enabled(enabled)
+        self.tray.set_trigger_key(new_cfg["trigger"].get("key", "ctrl"))
 
         self.popup._apply_style()
         self.qapp.setStyleSheet(build_qss(palette(new_cfg["popup"]["theme"])))

@@ -10,6 +10,8 @@ from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
 logger = logging.getLogger("ctrltrans.tray")
 
+KEY_LABELS = {"ctrl": "Ctrl", "alt": "Alt", "shift": "Shift"}
+
 
 class TrayController(QObject):
     settings_requested = Signal()
@@ -18,13 +20,15 @@ class TrayController(QObject):
     autostart_changed = Signal(bool)
     quit_requested = Signal()
 
-    def __init__(self, icon: QIcon, enabled: bool = True, parent: QObject | None = None):
+    def __init__(self, icon: QIcon, enabled: bool = True, key: str = "ctrl",
+                 parent: QObject | None = None):
         super().__init__(parent)
+        self._key_label = KEY_LABELS.get(key, KEY_LABELS["ctrl"])
         self.tray = QSystemTrayIcon(icon, self)
-        self.tray.setToolTip("CtrlTranslate · 双击 Ctrl 划词翻译")
+        self.tray.setToolTip(f"CtrlTranslate · 双击 {self._key_label} 划词翻译")
 
         menu = QMenu()
-        self.act_enable = QAction("启用双击 Ctrl 取词", menu)
+        self.act_enable = QAction(f"启用双击 {self._key_label} 取词", menu)
         self.act_enable.setCheckable(True)
         self.act_enable.setChecked(enabled)
         self.act_enable.toggled.connect(self.enabled_changed.emit)
@@ -67,5 +71,14 @@ class TrayController(QObject):
     def set_enabled(self, enabled: bool) -> None:
         self.act_enable.setChecked(enabled)
         self.tray.setToolTip(
-            "CtrlTranslate · 双击 Ctrl 划词翻译" if enabled else "CtrlTranslate · 已暂停（托盘菜单可启用）"
+            f"CtrlTranslate · 双击 {self._key_label} 划词翻译"
+            if enabled
+            else "CtrlTranslate · 已暂停（托盘菜单可启用）"
         )
+
+    def set_trigger_key(self, key: str) -> None:
+        """触发键变更后同步菜单与 tooltip 文案（不改勾选状态）。"""
+        self._key_label = KEY_LABELS.get(key, KEY_LABELS["ctrl"])
+        self.act_enable.setText(f"启用双击 {self._key_label} 取词")
+        if self.act_enable.isChecked():
+            self.tray.setToolTip(f"CtrlTranslate · 双击 {self._key_label} 划词翻译")

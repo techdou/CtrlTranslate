@@ -227,8 +227,14 @@ class SettingsDialog(QDialog):
         tr, cap = self.cfg["trigger"], self.cfg["capture"]
         form, page = self._page("触发与取词")
 
-        self.ck_hotkey = QCheckBox("启用双击 Ctrl 划词翻译")
+        self.ck_hotkey = QCheckBox("启用双击划词翻译")
         self.ck_hotkey.setChecked(tr.get("enabled", True))
+
+        self.cb_key = QComboBox()
+        self.cb_key.addItem("双击 Ctrl", "ctrl")
+        self.cb_key.addItem("双击 Alt", "alt")
+        self.cb_key.addItem("双击 Shift", "shift")
+        _select_combo(self.cb_key, tr.get("key", "ctrl"))
 
         self.sl_interval = QSlider(Qt.Horizontal)
         self.sl_interval.setRange(150, 600)
@@ -251,6 +257,7 @@ class SettingsDialog(QDialog):
         self.sp_max_chars.setValue(self.cfg["translate"].get("max_chars", 3000))
 
         form.addRow("", self.ck_hotkey)
+        form.addRow("触发键", self.cb_key)
         form.addRow("双击判定间隔", _hbox(self.sl_interval, self.lbl_interval))
         form.addRow("", self.ck_uia)
         form.addRow("复制法等待上限", self.sp_clip_wait)
@@ -371,6 +378,7 @@ class SettingsDialog(QDialog):
         t["auto_play_what"] = self.cb_autoplay_what.currentData()
 
         cfg["trigger"]["enabled"] = self.ck_hotkey.isChecked()
+        cfg["trigger"]["key"] = self.cb_key.currentData() or "ctrl"
         cfg["trigger"]["interval_ms"] = self.sl_interval.value()
         cfg["capture"]["prefer_uia"] = self.ck_uia.isChecked()
         cfg["capture"]["clipboard_wait_ms"] = self.sp_clip_wait.value()

@@ -1,4 +1,4 @@
-"""历史记录 + 生词本窗口：搜索、删除、导出 CSV。"""
+"""历史记录 + 生词本窗口：搜索、删除、导出 CSV；双击条目回看原文与译文。"""
 
 from __future__ import annotations
 
@@ -29,18 +29,26 @@ from app.ui.theme import build_qss, palette
 logger = logging.getLogger("ctrltrans.library")
 
 
+_ROW_DATA_ROLE = Qt.UserRole + 1  # 第一列额外挂整行 dict，双击回看用
+
+
 class LibraryWindow(QMainWindow):
-    def __init__(self, theme: str = "dark", parent=None):
+    def __init__(self, theme: str = "dark", popup=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("历史与生词本 · CtrlTranslate")
         self.resize(860, 560)
         self.theme = theme
+        self._popup = popup  # 双击回看时复用翻译弹窗（朗读/复制/重译按钮现成）
 
         self.tabs = QTabWidget()
         self.tab_history = self._build_table(["时间", "原文", "译文", "来源"])
         self.tab_vocab = self._build_table(["时间", "词/原文", "笔记", "上下文"])
         self.tabs.addTab(self.tab_history, "翻译历史")
         self.tabs.addTab(self.tab_vocab, "生词本")
+        self.tab_history.cellDoubleClicked.connect(
+            lambda r, _c: self._open_row(self.tab_history, r, "history"))
+        self.tab_vocab.cellDoubleClicked.connect(
+            lambda r, _c: self._open_row(self.tab_vocab, r, "vocab"))
 
         self.ed_search = QLineEdit()
         self.ed_search.setPlaceholderText("搜索…（回车刷新）")
@@ -70,6 +78,7 @@ class LibraryWindow(QMainWindow):
 
         self.btn_clear.setVisible(True)
         self.tabs.currentChanged.connect(self._on_tab_changed)
+        self.statusBar().showMessage("双击条目回看原文与译文（可朗读 / 复制 / 重译）")
         self._apply_theme()
         self.refresh()
 
@@ -124,6 +133,7 @@ class LibraryWindow(QMainWindow):
                 if c == 0:
                     item.setForeground(QColor(p["text_dim"]))  # 时间列用主题次级色
                     item.setData(Qt.UserRole, row.get("id"))  # 删除操作用
+                    item.setData(_ROW_DATA_ROLE, row)          # 双击回看用
                 table.setItem(r, c, item)
 
     def _show_placeholder(self, table: QTableWidget, rows: list[dict], text: str) -> None:
@@ -147,6 +157,19 @@ class LibraryWindow(QMainWindow):
         self.refresh()
 
     # ---------------------------------------------------------------- 操作
+
+    def _open_row(self, table: QTableWidget, row: int, kind: str) -> None:
+        """双击行：弹出原文与译文回看（不发翻译请求）。"""
+        if self._popup is None:
+            return
+        item = table.item(row, 0)
+        if item is None:
+            return
+        data = item.data(_ROW_DATA_ROLE) or {}
+        if kind == "history":
+            self._popup.show_result(data.get("source_text") or "", data.get("translated") or "")
+        else:
+            self._popup.show_result(data.get("word") or "", data.get("note") or "")
 
     def _export(self) -> None:
         default = "生词本.csv" if self.tabs.currentIndex() == 1 else "翻译历史.csv"

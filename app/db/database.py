@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -51,15 +52,30 @@ def _connect(db_path: Path | None = None) -> sqlite3.Connection:
     return conn
 
 
+@contextmanager
+def _conn(db_path: Path | None = None):
+    """事务语义（成功提交/异常回滚）+ 确保关闭。
+
+    sqlite3.Connection 自带的 __exit__ 只管事务不关连接；直接 `with _connect()`
+    的连接要等 GC 才释放，Windows 下会锁住 db 文件（清库/导出时撞 WinError 32）。
+    """
+    conn = _connect(db_path)
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
+
+
 def init_db(db_path: Path | None = None) -> None:
-    with _connect(db_path) as conn:
+    with _conn(db_path) as conn:
         conn.executescript(_SCHEMA)
 
 
 # ---------- 历史 ----------
 
 def add_history(source_text: str, translated: str, source_app: str = "", db_path: Path | None = None) -> int:
-    with _connect(db_path) as conn:
+    with _conn(db_path) as conn:
         cur = conn.execute(
             "INSERT INTO history (source_text, translated, source_app) VALUES (?, ?, ?)",
             (source_text, translated, source_app),
@@ -78,12 +94,12 @@ def list_history(
         args += [like, like]
     sql += " ORDER BY id DESC LIMIT ? OFFSET ?"
     args += [limit, offset]
-    with _connect(db_path) as conn:
+    with _conn(db_path) as conn:
         return [dict(r) for r in conn.execute(sql, args).fetchall()]
 
 
 def clear_history(db_path: Path | None = None) -> None:
-    with _connect(db_path) as conn:
+    with _conn(db_path) as conn:
         conn.execute("DELETE FROM history")
 
 
@@ -91,7 +107,7 @@ def clear_history(db_path: Path | None = None) -> None:
 
 def upsert_word(word: str, note: str = "", context: str = "", db_path: Path | None = None) -> None:
     """收藏单词：已存在时更新笔记与上下文（保留首次收藏时间）。"""
-    with _connect(db_path) as conn:
+    with _conn(db_path) as conn:
         conn.execute(
             """
             INSERT INTO vocabulary (word, note, context) VALUES (?, ?, ?)
@@ -111,16 +127,16 @@ def list_words(search: str = "", db_path: Path | None = None) -> list[dict[str, 
         like = f"%{search}%"
         args += [like, like]
     sql += " ORDER BY id DESC"
-    with _connect(db_path) as conn:
+    with _conn(db_path) as conn:
         return [dict(r) for r in conn.execute(sql, args).fetchall()]
 
 
 def delete_word(word_id: int, db_path: Path | None = None) -> None:
-    with _connect(db_path) as conn:
+    with _conn(db_path) as conn:
         conn.execute("DELETE FROM vocabulary WHERE id = ?", (word_id,))
 
 
 def word_exists(word: str, db_path: Path | None = None) -> bool:
-    with _connect(db_path) as conn:
+    with _conn(db_path) as conn:
         row = conn.execute("SELECT 1 FROM vocabulary WHERE word = ?", (word.strip(),)).fetchone()
         return row is not None

@@ -88,7 +88,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "trigger": {
         "enabled": True,
-        "interval_ms": 300,         # 双击 Ctrl 判定窗口
+        "key": "ctrl",              # 双击触发键：ctrl / alt / shift
+        "interval_ms": 300,         # 双击判定窗口
     },
     "capture": {
         "prefer_uia": True,         # False = 直接走剪贴板模拟
