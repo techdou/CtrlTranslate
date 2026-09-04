@@ -72,10 +72,20 @@ def build_qss(p: dict) -> str:
         padding: 6px 16px;
     }}
     QPushButton:hover {{ border-color: {p['accent']}; color: {p['accent']}; }}
-    QPushButton:focus {{ border-color: {p['accent']}; }}
+    QPushButton:focus {{ border: 2px solid {p['accent']}; padding: 5px 15px; }}
     QPushButton:pressed {{ background: {p['panel2']}; }}
     QPushButton:disabled {{ color: {p['text_dim']}; }}
     QPushButton:checked {{ border-color: {p['accent']}; color: {p['accent']}; }}
+    QPushButton#danger {{
+        color: {p['error']};
+        border-color: {p['error']};
+    }}
+    QPushButton#danger:hover {{
+        background: {p['error']};
+        color: {p['bg']};
+        border-color: {p['error']};
+    }}
+    QPushButton#danger:focus {{ border: 2px solid {p['error']}; padding: 5px 15px; }}
     QPushButton#primary {{
         background: {p['accent']};
         color: {p['accent_text']};
@@ -97,13 +107,13 @@ def build_qss(p: dict) -> str:
     }}
     QRadioButton {{ spacing: 8px; }}
     QRadioButton::indicator {{
-        width: 16px; height: 16px;
+        width: 14px; height: 14px;
         border: 1px solid {p['border']};
-        border-radius: 8px;
+        border-radius: 7px;
         background: {p['panel']};
     }}
     QRadioButton::indicator:checked {{
-        border: 4px solid {p['accent']};
+        border: 3px solid {p['accent']};
         background: {p['panel']};
     }}
     QSlider::groove:horizontal {{
@@ -166,7 +176,7 @@ def build_qss(p: dict) -> str:
         padding: 6px;
     }}
     QLabel#dim {{ color: {p['text_dim']}; }}
-    QLabel#sectionTitle {{ font-size: 15px; font-weight: 600; }}
+    QLabel#sectionTitle {{ font-size: 17px; font-weight: 600; padding-bottom: 4px; }}
     QScrollArea {{ border: none; }}
     QToolTip {{
         background: {p['panel']};

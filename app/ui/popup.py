@@ -53,6 +53,11 @@ class TranslatePopup(QWidget):
         self._status_timer = QTimer(self)
         self._status_timer.setSingleShot(True)
         self._status_timer.timeout.connect(lambda: self._set_status(""))
+        self._loading_timer = QTimer(self)
+        self._loading_timer.setInterval(400)
+        self._loading_timer.timeout.connect(self._tick_loading)
+        self._loading_dots = 0
+        self._drag_pos = None
 
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_DeleteOnClose, False)
@@ -84,7 +89,7 @@ class TranslatePopup(QWidget):
         self.btn_pin.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.btn_pin.setMinimumWidth(64)  # 容纳「已钉住」三字；Fixed 策略防隐藏原文后吃满整行
         self.btn_pin.toggled.connect(self._on_pin_toggled)
-        head.addWidget(self.btn_pin, 0, Qt.AlignTop)
+        head.addWidget(self.btn_pin, 0, Qt.AlignTop | Qt.AlignRight)
         root.addLayout(head)
 
         self.result_view = QTextBrowser()
@@ -95,6 +100,7 @@ class TranslatePopup(QWidget):
         root.addWidget(self.result_view, 1)
 
         self.status_label = QLabel()
+        self.status_label.setVisible(False)  # 空状态不占行高，窗口高度贴合内容
         root.addWidget(self.status_label)
 
         btns = QHBoxLayout()
@@ -103,6 +109,7 @@ class TranslatePopup(QWidget):
         self.btn_speak_trans = QPushButton("读译文")
         self.btn_star = QPushButton("收藏")
         self.btn_copy = QPushButton("复制")
+        self.btn_copy.setObjectName("primary")  # 复制是最高频动作，给主按钮视觉
         self.btn_retry = QPushButton("重试")
         for b in (self.btn_speak_source, self.btn_speak_trans, self.btn_star,
                   self.btn_copy, self.btn_retry):
@@ -151,8 +158,18 @@ class TranslatePopup(QWidget):
             }}
             QPushButton:hover {{ color: {p['accent']}; border-color: {p['accent']}; }}
             QPushButton:checked {{ color: {p['accent']}; border-color: {p['accent']}; }}
+            QPushButton#primary {{
+                background: {p['accent']}; color: {p['accent_text']};
+                border: none; font-weight: 600;
+            }}
+            QPushButton#primary:hover {{ background: {p['accent_hover']}; color: {p['accent_text']}; }}
+            QPushButton#primary:disabled {{ background: {p['panel2']}; color: {p['text_dim']}; }}
         """)
-        self.result_view.setMinimumHeight(60)
+        # 主题/字号变化后按当前内容重排高度；空窗口回到基线（各展示路径会自行重设）
+        if self.result_view.toPlainText().strip():
+            self._fit_height()
+        else:
+            self.result_view.setFixedHeight(60)
 
     # ---------------------------------------------------------------- 生命周期
 
@@ -167,15 +184,19 @@ class TranslatePopup(QWidget):
         via = " · 取词：UIA" if method == "uia" else ""
         self.source_label.setText(f"原文{via}\n{html.escape(preview)}")
         self.source_label.setVisible(True)
-        # 上一次长译文撑高的 minHeight 会残留，先复位再由本次内容决定
-        self.result_view.setMinimumHeight(60)
+        # 上一次译文残留的 fixed 高度先复位，loading 态窗口收敛到一行占位
+        self.result_view.setFixedHeight(60)
         # loading 占位放正文区（视线落点），首个 chunk 整体替换
         self.result_view.setHtml(f"<div style='color:{p['text_dim']};'>翻译中…</div>")
+        self._loading_dots = 0
+        self._loading_timer.start()
         self._set_status("")
-        self.btn_star.setEnabled(True)
         for b in (self.btn_speak_source, self.btn_speak_trans, self.btn_star,
                   self.btn_copy, self.btn_retry):
             b.setVisible(True)
+        # 译文未出：读译文/复制拿到空文本，收藏会写入无译文生词——译文到位后再启用
+        for b in (self.btn_speak_trans, self.btn_star, self.btn_copy):
+            b.setEnabled(False)
 
         self._place_near_cursor()
         self.show()
@@ -198,13 +219,13 @@ class TranslatePopup(QWidget):
         preview = source[:SOURCE_PREVIEW_LIMIT] + ("…" if len(source) > SOURCE_PREVIEW_LIMIT else "")
         self.source_label.setText(f"原文\n{html.escape(preview)}")
         self.source_label.setVisible(True)
-        self.result_view.setMinimumHeight(60)  # 清掉上次长译文残留的 minHeight
+        self.result_view.setFixedHeight(60)  # 清掉上次残留的 fixed 高度，再由 _fit_height 按内容定
         self.result_view.setHtml(_format_result(translated or "（无译文）", p))
         self._set_status("")
-        self.btn_star.setEnabled(True)
         for b in (self.btn_speak_source, self.btn_speak_trans, self.btn_star,
                   self.btn_copy, self.btn_retry):
             b.setVisible(True)
+            b.setEnabled(True)
 
         self._fit_height()
         self.show()
@@ -221,7 +242,8 @@ class TranslatePopup(QWidget):
         self._placeholder_active = False
         self.source_label.setText("")
         self.source_label.setVisible(False)  # 空文本时 padding+底色仍会渲染，整块隐藏
-        self.result_view.setMinimumHeight(60)  # 同 show_translation：清掉上次残留的 minHeight
+        self._loading_timer.stop()
+        self.result_view.setFixedHeight(60)  # 同 show_translation：清掉上次残留的 fixed 高度
         # 错误是此刻唯一重要的信息：进正文区、可选中复制；无关按钮隐藏
         self.result_view.setHtml(f"<div style='color:{p['error']};'>{html.escape(message)}</div>")
         self._set_status("")
@@ -229,7 +251,7 @@ class TranslatePopup(QWidget):
             b.setVisible(False)
         self.btn_retry.setVisible(True)
 
-        self._place_near_cursor()
+        self._fit_height()
         self.show()
         logger.info("popup showing message: %s", message[:60])
         self.raise_()
@@ -240,7 +262,8 @@ class TranslatePopup(QWidget):
         screen = QGuiApplication.screenAt(pos) or QGuiApplication.primaryScreen()
         avail = screen.availableGeometry()
         self.adjustSize()
-        w, h = self.width(), min(max(self.sizeHint().height(), 200), int(avail.height() * 0.6))
+        # 高度跟 sizeHint 走（译文区已按内容 fixed），不再设地板值——短内容小窗口
+        w, h = self.width(), min(self.sizeHint().height(), int(avail.height() * 0.6))
         self.resize(w, h)
         x, y = pos.x() + 18, pos.y() + 18
         if x + w > avail.right():
@@ -250,11 +273,12 @@ class TranslatePopup(QWidget):
         self.move(x, y)
 
     def _fit_height(self) -> None:
-        """译文区高度贴合内容（带上限），长译文不用拖滚动条读完。"""
+        """译文区高度贴合内容（带上限），窗口随内容伸缩，长译文内部滚动。"""
         doc = self.result_view.document()
         doc.setTextWidth(self.result_view.viewport().width())  # 同步触发重新排版
         text_h = int(doc.size().height()) + 8
-        self.result_view.setMinimumHeight(min(text_h, RESULT_MAX_GROW))
+        # fixed 而非 minimum：sizeHint 不再被 QTextBrowser 默认值撑大，窗口才收得回去
+        self.result_view.setFixedHeight(min(max(text_h, 60), RESULT_MAX_GROW))
         self._place_near_cursor()
 
     def _start_auto_close(self, cfg: dict) -> None:
@@ -274,6 +298,7 @@ class TranslatePopup(QWidget):
         sb = self.result_view.verticalScrollBar()
         at_bottom = sb.value() >= sb.maximum() - 8
         if self._placeholder_active:
+            self._loading_timer.stop()
             self.result_view.setPlainText(piece)  # 替换 loading 占位
             self.result_view.moveCursor(QTextCursor.MoveOperation.End)  # setPlainText 会把光标重置到开头
             self._placeholder_active = False
@@ -285,9 +310,13 @@ class TranslatePopup(QWidget):
     def on_done(self, text: str, task_id: int) -> None:
         if task_id != self._task_id:
             return
+        self._loading_timer.stop()
         self._translated = text
         p = palette(self._cfg_getter().get("popup", {}).get("theme", "dark"))
         self.result_view.setHtml(_format_result(text, p))
+        # 译文到位，恢复 loading 期间禁用的按钮
+        for b in (self.btn_speak_trans, self.btn_star, self.btn_copy):
+            b.setEnabled(True)
         self._fit_height()
         self._set_status("")
 
@@ -355,10 +384,21 @@ class TranslatePopup(QWidget):
 
     # ---------------------------------------------------------------- 杂项
 
+    def _tick_loading(self) -> None:
+        """loading 占位的三点跳动动画；首个 chunk 到达（占位被替换）后自停。"""
+        if not self._placeholder_active:
+            self._loading_timer.stop()
+            return
+        self._loading_dots = (self._loading_dots + 1) % 4
+        p = palette(self._cfg_getter().get("popup", {}).get("theme", "dark"))
+        self.result_view.setHtml(
+            f"<div style='color:{p['text_dim']};'>翻译中{'.' * self._loading_dots}</div>")
+
     def _set_status(self, text: str, error: bool = False) -> None:
         p = palette(self._cfg_getter().get("popup", {}).get("theme", "dark"))
         color = p["error"] if error else (p["accent"] if text else p["text_dim"])
         self.status_label.setText(html.escape(text))
+        self.status_label.setVisible(bool(text))  # 空文本不占行高
         self.status_label.setStyleSheet(f"color: {color}; font-size: 12px;")
 
     def _flash_status(self, text: str) -> None:
@@ -376,6 +416,22 @@ class TranslatePopup(QWidget):
             self.hide()
         super().keyPressEvent(event)
 
+    # 无边框窗口的拖拽移动：按住窗口空白处（非文本/按钮区域）拖动。
+    # 子控件会吃掉自己区域内的鼠标事件，不会干扰文本选择与按钮点击。
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._drag_pos is not None and event.buttons() & Qt.LeftButton:
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        self._drag_pos = None
+        super().mouseReleaseEvent(event)
+
     def eventFilter(self, obj, event) -> bool:
         # 点击其他应用（本应用整体失活）→ 关闭弹窗（钉住时除外）。
         # 设置等本应用窗口间的切换不会触发 ApplicationDeactivate，安全。
@@ -391,6 +447,7 @@ class TranslatePopup(QWidget):
     def hideEvent(self, event) -> None:
         self._auto_close_timer.stop()
         self._status_timer.stop()
+        self._loading_timer.stop()
         self._tts.stop()
         super().hideEvent(event)
 

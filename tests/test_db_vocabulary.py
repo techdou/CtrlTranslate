@@ -16,6 +16,18 @@ def test_history_crud(tmp_path: Path):
     assert database.list_history(db_path=db) == []
 
 
+def test_history_delete_single(tmp_path: Path):
+    db = tmp_path / "t.db"
+    database.init_db(db)
+    id1 = database.add_history("hello", "你好", "chrome.exe", db)
+    id2 = database.add_history("world", "世界", "acrobat.exe", db)
+    database.delete_history(id1, db)
+    rows = database.list_history(db_path=db)
+    assert [r["id"] for r in rows] == [id2]
+    database.delete_history(99999, db)  # 不存在的 id：静默无错
+    assert len(database.list_history(db_path=db)) == 1
+
+
 def test_vocabulary_upsert_keeps_first_note(tmp_path: Path):
     db = tmp_path / "t.db"
     database.init_db(db)

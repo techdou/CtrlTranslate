@@ -98,6 +98,11 @@ def list_history(
         return [dict(r) for r in conn.execute(sql, args).fetchall()]
 
 
+def delete_history(row_id: int, db_path: Path | None = None) -> None:
+    with _conn(db_path) as conn:
+        conn.execute("DELETE FROM history WHERE id = ?", (row_id,))
+
+
 def clear_history(db_path: Path | None = None) -> None:
     with _conn(db_path) as conn:
         conn.execute("DELETE FROM history")

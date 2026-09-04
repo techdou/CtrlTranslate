@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -60,6 +60,7 @@ class LibraryWindow(QMainWindow):
         self.btn_delete = QPushButton("删除选中")
         self.btn_delete.clicked.connect(self._delete_selected)
         self.btn_clear = QPushButton("清空历史")
+        self.btn_clear.setObjectName("danger")  # 全量删除，用 error 色与普通操作拉开
         self.btn_clear.clicked.connect(self._clear_history)
 
         bar = QHBoxLayout()
@@ -79,6 +80,8 @@ class LibraryWindow(QMainWindow):
         self.btn_clear.setVisible(True)
         self.tabs.currentChanged.connect(self._on_tab_changed)
         self.statusBar().showMessage("双击条目回看原文与译文（可朗读 / 复制 / 重译）")
+        self.tab_history.installEventFilter(self)  # 空态占位随窗口 resize 重新居中
+        self.tab_vocab.installEventFilter(self)
         self._apply_theme()
         self.refresh()
 
@@ -114,11 +117,14 @@ class LibraryWindow(QMainWindow):
         if self.tabs.currentIndex() == 0:
             rows = database.list_history(search=search)
             self._fill(self.tab_history, rows, ["created_at", "source_text", "translated", "source_app"])
-            self._show_placeholder(self.tab_history, rows, "暂无翻译历史 · 划词翻译后自动保存")
+            # 搜索无命中与库真空是两种状态，文案不能混用（否则误以为历史被清空）
+            empty = f"没有匹配「{search}」的记录" if search else "暂无翻译历史 · 划词翻译后自动保存"
+            self._show_placeholder(self.tab_history, rows, empty)
         else:
             rows = database.list_words(search=search)
             self._fill(self.tab_vocab, rows, ["created_at", "word", "note", "context"])
-            self._show_placeholder(self.tab_vocab, rows, "生词本为空 · 在翻译弹窗点「收藏」加入")
+            empty = f"没有匹配「{search}」的记录" if search else "生词本为空 · 在翻译弹窗点「收藏」加入"
+            self._show_placeholder(self.tab_vocab, rows, empty)
 
     def _fill(self, table: QTableWidget, rows: list[dict], cols: list[str]) -> None:
         p = palette(self.theme)
@@ -127,7 +133,7 @@ class LibraryWindow(QMainWindow):
             table.insertRow(r)
             for c, key in enumerate(cols):
                 raw = str(row.get(key) or "")
-                shown = raw[:60] + "…" if len(raw) > 60 else raw
+                shown = _fmt_time(raw) if c == 0 else raw[:60] + "…" if len(raw) > 60 else raw
                 item = QTableWidgetItem(shown)
                 item.setToolTip(raw)  # 悬停看全文
                 if c == 0:
@@ -147,13 +153,22 @@ class LibraryWindow(QMainWindow):
         p = palette(self.theme)
         lbl = QLabel(text, table)
         lbl.setStyleSheet(f"color: {p['text_dim']}; font-size: 13px; background: transparent;")
-        lbl.setGeometry(table.width() // 2 - 140, table.height() // 2 - 20, 280, 24)
+        lbl.adjustSize()  # 宽度按文案自适应，居中计算才准
+        _center_in_table(table, lbl)
         lbl.setVisible(True)
         table._placeholder = lbl
 
+    def eventFilter(self, obj, event) -> bool:
+        # 窗口/表格尺寸变化后，空态占位重新居中（一次性 setGeometry 会跑偏）
+        if event.type() == QEvent.Resize:
+            for table in (self.tab_history, self.tab_vocab):
+                lbl = getattr(table, "_placeholder", None)
+                if lbl is not None:
+                    _center_in_table(table, lbl)
+        return super().eventFilter(obj, event)
+
     def _on_tab_changed(self, index: int) -> None:
-        self.btn_clear.setVisible(index == 0)
-        self.btn_delete.setVisible(index == 1)
+        self.btn_clear.setVisible(index == 0)  # 全量清空只作用于历史；单条删除两个 Tab 都可用
         self.refresh()
 
     # ---------------------------------------------------------------- 操作
@@ -186,15 +201,19 @@ class LibraryWindow(QMainWindow):
             QMessageBox.critical(self, "导出失败", str(e))
 
     def _delete_selected(self) -> None:
-        rows = {i.row() for i in self.tab_vocab.selectedIndexes()}
+        on_history = self.tabs.currentIndex() == 0
+        table = self.tab_history if on_history else self.tab_vocab
+        rows = {i.row() for i in table.selectedIndexes()}
         if not rows:
             return
-        if QMessageBox.question(self, "删除", f"删除选中的 {len(rows)} 个词条？") != QMessageBox.Yes:
+        unit = "条历史" if on_history else "个词条"
+        if QMessageBox.question(self, "删除", f"删除选中的 {len(rows)} {unit}？") != QMessageBox.Yes:
             return
+        delete = database.delete_history if on_history else database.delete_word
         for r in sorted(rows, reverse=True):
-            row_id = self.tab_vocab.item(r, 0).data(Qt.UserRole)
+            row_id = table.item(r, 0).data(Qt.UserRole)
             if row_id is not None:
-                database.delete_word(row_id)
+                delete(row_id)
         self.refresh()
 
     def _clear_history(self) -> None:
@@ -204,6 +223,24 @@ class LibraryWindow(QMainWindow):
             return
         database.clear_history()
         self.refresh()
+
+
+def _fmt_time(raw: str) -> str:
+    """时间列短格式：当年省掉年份与秒，跨年保留日期；完整时间仍在 tooltip。"""
+    from datetime import datetime
+
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return raw
+    if dt.year == datetime.now().year:
+        return dt.strftime("%m-%d %H:%M")
+    return dt.strftime("%Y-%m-%d")
+
+
+def _center_in_table(table: QTableWidget, lbl) -> None:
+    lbl.move(max(0, (table.width() - lbl.width()) // 2),
+             max(0, (table.height() - lbl.height()) // 2))
 
 
 def _p(path: str):
