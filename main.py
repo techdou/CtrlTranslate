@@ -27,9 +27,6 @@ from app.ui.settings import SettingsDialog
 from app.ui.theme import build_qss, palette
 from app.ui.tray import TrayController
 
-ICON_PATH = DATA_DIR / "assets" / "icon.png"
-
-
 def load_icon() -> QIcon:
     # 开发环境：项目 assets/；打包后：_MEIPASS/assets/ 或 exe 同级
     from pathlib import Path
@@ -41,7 +38,9 @@ def load_icon() -> QIcon:
     ]
     for c in candidates:
         if c.exists():
-            return QIcon(str(c))
+            icon = QIcon(str(c))
+            icon.addFile(str(c))  # 显式挂一份默认尺寸，托盘/窗口/任务栏取同一图标
+            return icon
     return QIcon()
 
 
@@ -213,6 +212,7 @@ class CtrlApp:
 def main() -> int:
     QApplication.setApplicationName("CtrlTranslate")
     app = QApplication(sys.argv)
+    app.setWindowIcon(load_icon())  # 任务栏/标题栏统一应用图标（托盘另有实例）
     app.setQuitOnLastWindowClosed(False)
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)

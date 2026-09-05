@@ -313,3 +313,71 @@ def test_incomplete_fallback_config_ignored(qapp):
         assert _spin(qapp, lambda: bool(err))
         assert "无法连接" in err[0]
         assert fb == [] and calls == []
+
+
+# ---------------------------------------------------------------- test_connection（设置页）
+
+class _TestResp:
+    """非流式 create 的最小返回结构（resp.choices[0].message.content）。"""
+
+    def __init__(self, content):
+        self.choices = [types.SimpleNamespace(message=types.SimpleNamespace(content=content))]
+
+
+def test_test_connection_uses_explicit_endpoint_not_saved_cfg(qapp):
+    """契约：显式 endpoint（设置页表单当前值）优先于已保存配置。"""
+    seen = []
+
+    def openai_ctor(**kw):
+        seen.append(kw.get("base_url"))
+
+        class _Completions:
+            def create(self, **_kw):
+                return _TestResp("ok")
+
+        return types.SimpleNamespace(chat=types.SimpleNamespace(completions=_Completions()))
+
+    mod = types.ModuleType("openai")
+    mod.OpenAI = openai_ctor
+    with mock.patch.dict(sys.modules, {"openai": mod}):
+        tr = Translator(lambda: CFG)  # 已保存 cfg 指向 https://x/v1
+        results = []
+        tr.test_connection(
+            lambda m: results.append(("ok", m)),
+            lambda m: results.append(("fail", m)),
+            endpoint=("https://form-value/v1", "sk-form", "m-form"),
+        )
+        assert _spin(qapp, lambda: bool(results)), "no test result"
+        assert seen == ["https://form-value/v1"]  # 用表单值，不是已保存的 https://x/v1
+        assert results[0][0] == "ok" and "ok" in results[0][1]
+
+
+def test_test_connection_failure_via_signal(qapp):
+    """失败路径：错误文案经 test_result 信号投递，on_fail 在主线程收到。"""
+
+    def openai_ctor(**kw):
+        def create(**_kw):
+            raise _conn_error("connection error")
+
+        return types.SimpleNamespace(
+            chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=create)))
+
+    mod = types.ModuleType("openai")
+    mod.OpenAI = openai_ctor
+    with mock.patch.dict(sys.modules, {"openai": mod}):
+        tr = Translator(lambda: CFG)
+        results = []
+        tr.test_connection(
+            lambda m: results.append(("ok", m)),
+            lambda m: results.append(("fail", m)),
+            endpoint=("https://x/v1", "sk", "m"),
+        )
+        assert _spin(qapp, lambda: bool(results))
+        assert results[0][0] == "fail"
+        assert "无法连接" in results[0][1]
+
+
+def test_dispatch_test_result_invokes_callback():
+    calls = []
+    Translator._dispatch_test_result(calls.append, "msg", True)
+    assert calls == ["msg"]

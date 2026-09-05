@@ -117,7 +117,7 @@ class SettingsDialog(QDialog):
             label = preset["label"] + ("  · 需代理" if preset["needs_proxy"] else "")
             self.cb_preset.addItem(label, key)
         current = p.get("name", "zhipu")
-        self.cb_preset.setCurrentIndex(max(0, list(PROVIDER_PRESETS).index(current)))
+        _select_combo(self.cb_preset, current)  # findData 找不到时保持第 0 项
         self.cb_preset.currentIndexChanged.connect(self._on_preset_changed)
 
         self.ed_base_url = QLineEdit(p["base_url"])
@@ -168,6 +168,15 @@ class SettingsDialog(QDialog):
             label = preset["label"] + ("  · 需代理" if preset["needs_proxy"] else "")
             self.cb_fb_preset.addItem(label, key)
         self.cb_fb_preset.setCurrentIndex(0)
+        # 按已存地址反查预设让下拉不误导；blockSignals 防止反查触发模板覆盖已填值
+        fb_url = fb.get("base_url", "")
+        self.cb_fb_preset.blockSignals(True)
+        if fb_url:  # 空配置不反查（custom 的 base_url 也是空串，会误匹配）
+            for i in range(self.cb_fb_preset.count()):
+                if PROVIDER_PRESETS[self.cb_fb_preset.itemData(i)]["base_url"] == fb_url:
+                    self.cb_fb_preset.setCurrentIndex(i)
+                    break
+        self.cb_fb_preset.blockSignals(False)
         self.cb_fb_preset.currentIndexChanged.connect(self._on_fb_preset_changed)
 
         self.ed_fb_url = QLineEdit(fb.get("base_url", ""))
@@ -281,7 +290,7 @@ class SettingsDialog(QDialog):
             lambda _i: self._sync_engine_fields(form))
         for w in (self.cb_engine, self.cb_voice_zh, self.cb_voice_en, self.cb_rate,
                   self.ed_tts_url, self.ed_tts_model, self.ed_tts_voice, self.ed_tts_key,
-                  self.ck_autoplay, self.cb_autoplay_what):
+                  self.btn_tts_eye, self.ck_autoplay, self.cb_autoplay_what):
             w.setEnabled(self.ck_tts.isChecked())
 
         form.addRow("", self.ck_tts)
@@ -452,7 +461,12 @@ class SettingsDialog(QDialog):
         self._translator.test_connection(ok, fail, endpoint=endpoint)
 
     def _test_connection(self) -> None:
-        self._collect_into(self.cfg)  # 用当前表单值测试
+        # 用表单当前值测试（未保存的 Key/模型也要能测），与备用测试同一通道
+        endpoint = (
+            self.ed_base_url.text().strip(),
+            self.ed_api_key.text().strip(),
+            self.cb_model.currentText().strip(),
+        )
         self.lbl_test.setText("测试中…")
         self.btn_test.setEnabled(False)
 
@@ -466,7 +480,7 @@ class SettingsDialog(QDialog):
             self.lbl_test.setStyleSheet(f"color: {palette(self.cfg['popup']['theme'])['error']}")
             self.btn_test.setEnabled(True)
 
-        self._translator.test_connection(ok, fail)
+        self._translator.test_connection(ok, fail, endpoint=endpoint)
 
     def _open_data_dir(self) -> None:
         from PySide6.QtGui import QDesktopServices

@@ -58,6 +58,7 @@ class TranslatePopup(QWidget):
         self._loading_timer.timeout.connect(self._tick_loading)
         self._loading_dots = 0
         self._drag_pos = None
+        self._dragged = False  # 用户手动拖过弹窗后，内容重排只改尺寸不再挪位置
 
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_DeleteOnClose, False)
@@ -179,6 +180,8 @@ class TranslatePopup(QWidget):
         p = palette(cfg.get("popup", {}).get("theme", "dark"))
         self._source = source
         self._translated = ""
+        self._dragged = False  # 新一次翻译重新锚定鼠标位置
+        self._task_id = -1
         self._placeholder_active = True  # loading 占位在正文区，首块 chunk 需替换而非追加
         preview = source[:SOURCE_PREVIEW_LIMIT] + ("…" if len(source) > SOURCE_PREVIEW_LIMIT else "")
         via = " · 取词：UIA" if method == "uia" else ""
@@ -215,6 +218,7 @@ class TranslatePopup(QWidget):
         self._source = source
         self._translated = translated
         self._task_id = -1  # 作废进行中的翻译回调
+        self._dragged = False
         self._placeholder_active = False
         preview = source[:SOURCE_PREVIEW_LIMIT] + ("…" if len(source) > SOURCE_PREVIEW_LIMIT else "")
         self.source_label.setText(f"原文\n{html.escape(preview)}")
@@ -279,7 +283,10 @@ class TranslatePopup(QWidget):
         text_h = int(doc.size().height()) + 8
         # fixed 而非 minimum：sizeHint 不再被 QTextBrowser 默认值撑大，窗口才收得回去
         self.result_view.setFixedHeight(min(max(text_h, 60), RESULT_MAX_GROW))
-        self._place_near_cursor()
+        if self._dragged:
+            self.adjustSize()  # 只按新尺寸重算窗口，左上角留在用户拖放的位置
+        else:
+            self._place_near_cursor()
 
     def _start_auto_close(self, cfg: dict) -> None:
         secs = int(cfg.get("popup", {}).get("auto_close_s", 0))
@@ -425,6 +432,7 @@ class TranslatePopup(QWidget):
 
     def mouseMoveEvent(self, event) -> None:
         if self._drag_pos is not None and event.buttons() & Qt.LeftButton:
+            self._dragged = True
             self.move(event.globalPosition().toPoint() - self._drag_pos)
         super().mouseMoveEvent(event)
 

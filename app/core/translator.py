@@ -48,12 +48,14 @@ class Translator(QObject):
     finished = Signal(str, int)        # 完整译文, task_id
     failed = Signal(str, int)          # 错误消息, task_id
     fallback_started = Signal(int)     # 主服务失败、开始用备用服务重试, task_id
+    test_result = Signal(object, str, bool)  # (回调, 消息, 是否成功) —— 后台线程结果回投主线程
 
     def __init__(self, cfg_getter, parent: QObject | None = None):
         super().__init__(parent)
         self._cfg_getter = cfg_getter
         self._task = 0
         self._lock = threading.Lock()
+        self.test_result.connect(self._dispatch_test_result)
 
     # ---------------------------------------------------------------- API
 
@@ -70,8 +72,13 @@ class Translator(QObject):
             self._task += 1
 
     def test_connection(self, on_ok, on_fail, endpoint: tuple[str, str, str] | None = None) -> None:
-        """设置界面用：发一条 mini 请求验证 endpoint（None = 主服务）。回调在主线程执行。"""
+        """设置界面用：发一条 mini 请求验证 endpoint（None = 已保存的主服务）。
+        结果经 test_result 信号在主线程执行回调（UI 安全）。"""
         threading.Thread(target=self._test_run, args=(on_ok, on_fail, endpoint), daemon=True).start()
+
+    @staticmethod
+    def _dispatch_test_result(callback, message: str, ok: bool) -> None:
+        callback(message)
 
     # ---------------------------------------------------------------- 内部
 
@@ -177,8 +184,9 @@ class Translator(QObject):
         try:
             from openai import OpenAI
 
-            cfg = self._cfg_getter()
-            base_url, api_key, model = endpoint or resolve_endpoint(cfg)
+            if endpoint is None:
+                endpoint = resolve_endpoint(self._cfg_getter())
+            base_url, api_key, model = endpoint
             if not base_url or not model:
                 raise ValueError("API 地址 / 模型未填写")
             if not api_key:
@@ -190,9 +198,9 @@ class Translator(QObject):
                 max_tokens=8,
             )
             answer = (resp.choices[0].message.content or "").strip()
-            on_ok(f"连通正常（模型返回：{answer[:20]}）")
+            self.test_result.emit(on_ok, f"连通正常（模型返回：{answer[:20]}）", True)
         except Exception as e:
-            on_fail(self._friendly_error(e, base_url))
+            self.test_result.emit(on_fail, self._friendly_error(e, base_url), False)
 
     # ---------------------------------------------------------------- 错误文案
 

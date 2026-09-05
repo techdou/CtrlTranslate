@@ -317,7 +317,9 @@ class TextCaptureService(QObject):
             if text:
                 self.captured.emit(text, method)
             else:
-                self.failed.emit("未取到选中文本（请先选中一段文字再双击 Ctrl）")
+                key = cfg.get("trigger", {}).get("key", "ctrl")
+                key_label = {"ctrl": "Ctrl", "alt": "Alt", "shift": "Shift"}.get(key, "Ctrl")
+                self.failed.emit(f"未取到选中文本（请先选中一段文字再双击 {key_label}）")
         except Exception as e:
             logger.exception("capture failed")
             self.failed.emit(f"取词失败：{e}")
