@@ -8,9 +8,10 @@ from __future__ import annotations
 import sys
 
 from PySide6.QtCore import QLockFile, QTimer
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QDesktopServices, QIcon, QUrl
 from PySide6.QtWidgets import QApplication, QMessageBox
 
+from app import __version__
 from app.config import DATA_DIR, load_config, save_config
 from app.core.autostart import is_enabled as autostart_enabled
 from app.core.autostart import set_enabled as set_autostart
@@ -18,6 +19,7 @@ from app.core.capture import TextCaptureService, get_foreground_app
 from app.core.hotkey import HotkeyService
 from app.core.translator import Translator
 from app.core.tts import TTSService
+from app.core.update import UpdateChecker, is_newer
 from app.core.vocabulary import record_history
 from app.db import database
 from app.logger import setup_logger
@@ -76,6 +78,15 @@ class CtrlApp:
             key=self.cfg["trigger"].get("key", "ctrl"),
         )
         self.tray.set_autostart_checked(autostart_enabled())
+
+        # 更新检查
+        self.updater = UpdateChecker()
+        self.updater.done.connect(self._on_update_info)
+        self.updater.failed.connect(self._on_update_failed)
+        self._update_manual = False
+        self._release_url = ""
+        self.tray.messageClicked.connect(self._open_release_page)
+
         self._wire()
 
         qapp.setStyleSheet(build_qss(palette(self.cfg["popup"]["theme"])))
@@ -98,6 +109,8 @@ class CtrlApp:
         self.tray.library_requested.connect(self.open_library)
         self.tray.enabled_changed.connect(self.on_enabled_changed)
         self.tray.autostart_changed.connect(self.on_autostart_changed)
+        self.tray.check_update_requested.connect(self._check_update)
+        self.tray.about_requested.connect(self.open_about)
         self.tray.quit_requested.connect(self.quit)
 
     def start(self) -> None:
@@ -116,6 +129,7 @@ class CtrlApp:
                     8,
                 ),
             )
+        QTimer.singleShot(5000, lambda: self._check_update(manual=False))  # 静默查一次
 
     # ---------------------------------------------------------------- 事件链
 
@@ -138,8 +152,7 @@ class CtrlApp:
         if tts_cfg.get("enabled") and tts_cfg.get("auto_play"):
             what = tts_cfg.get("auto_play_what", "source")
             text = self._current_source if what == "source" else translated
-            lang = "en" if what == "source" else "zh"
-            QTimer.singleShot(120, lambda: self.tts.speak(text, lang))
+            QTimer.singleShot(120, lambda: self.tts.speak(text))  # 音色由 TTS 按内容语言自选
 
     # ---------------------------------------------------------------- 窗口
 
@@ -164,6 +177,45 @@ class CtrlApp:
         self._library.show()
         self._library.raise_()
         self._library.activateWindow()
+
+    # ---------------------------------------------------------------- 更新与关于
+
+    def _check_update(self, manual: bool = True) -> None:
+        self._update_manual = manual
+        self.updater.start()
+
+    def _on_update_info(self, latest: str, url: str) -> None:
+        self._release_url = url
+        if is_newer(latest, __version__):
+            self.tray.notify(
+                "发现新版本",
+                f"v{latest} 已发布（当前 v{__version__}）。点击本通知打开下载页。",
+                10,
+            )
+        elif self._update_manual:
+            self.tray.notify("检查更新", f"已是最新版本 v{__version__}", 5)
+
+    def _on_update_failed(self, msg: str) -> None:
+        if self._update_manual:
+            self.tray.notify(
+                "检查更新",
+                "无法获取最新版本（仓库私有 / 尚无发布 / 网络不通）",
+                5,
+            )
+
+    def _open_release_page(self) -> None:
+        if self._release_url:
+            QDesktopServices.openUrl(QUrl(self._release_url))
+
+    def open_about(self) -> None:
+        QMessageBox.about(
+            None,
+            "关于 CtrlTranslate",
+            f"<b>CtrlTranslate</b> v{__version__}<br><br>"
+            "双击触发键划词翻译 · 流式输出 · 术语收藏 · 生词本导出 Anki<br><br>"
+            f'<a href="https://github.com/techdou/CtrlTranslate">'
+            f"github.com/techdou/CtrlTranslate</a>",
+        )
 
     # ---------------------------------------------------------------- 配置变更
 

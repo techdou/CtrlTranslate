@@ -18,6 +18,8 @@ class TrayController(QObject):
     library_requested = Signal()
     enabled_changed = Signal(bool)
     autostart_changed = Signal(bool)
+    check_update_requested = Signal()
+    about_requested = Signal()
     quit_requested = Signal()
 
     def __init__(self, icon: QIcon, enabled: bool = True, key: str = "ctrl",
@@ -41,6 +43,10 @@ class TrayController(QObject):
         act_settings.triggered.connect(self.settings_requested.emit)
         act_library = QAction("历史与生词本…", menu)
         act_library.triggered.connect(self.library_requested.emit)
+        act_update = QAction("检查更新…", menu)
+        act_update.triggered.connect(self.check_update_requested.emit)
+        act_about = QAction("关于 CtrlTranslate", menu)
+        act_about.triggered.connect(self.about_requested.emit)
         act_quit = QAction("退出", menu)
         act_quit.triggered.connect(self.quit_requested.emit)
 
@@ -49,6 +55,9 @@ class TrayController(QObject):
         menu.addSeparator()
         menu.addAction(act_settings)
         menu.addAction(act_library)
+        menu.addSeparator()
+        menu.addAction(act_update)
+        menu.addAction(act_about)
         menu.addSeparator()
         menu.addAction(act_quit)
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import html
 import logging
+import re
 
 from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtGui import QGuiApplication, QTextCursor
@@ -33,6 +34,28 @@ logger = logging.getLogger("ctrltrans.popup")
 
 SOURCE_PREVIEW_LIMIT = 120
 RESULT_MAX_GROW = 360
+_TERM_SPLIT = re.compile(r"^【术语】\s*$", re.MULTILINE)
+_TERM_SEPS = [" — ", "—", " - ", " – ", "-"]
+
+
+def _parse_terms(text: str) -> list[tuple[str, str]]:
+    """解析译文里的【术语】段：每行一条 (术语, 含义)。分隔符容错多种破折号。"""
+    parts = _TERM_SPLIT.split(text or "")
+    if len(parts) < 2:
+        return []
+    out: list[tuple[str, str]] = []
+    for raw in parts[1].splitlines():
+        ln = raw.strip().lstrip("-·•* ").strip()  # LLM 偶尔加列表符号
+        if not ln:
+            continue
+        for sep in _TERM_SEPS:
+            word, _, meaning = ln.partition(sep)
+            if meaning.strip():
+                out.append((word.strip()[:500], meaning.strip()[:400]))
+                break
+        else:
+            out.append((ln[:500], ""))  # 无分隔符：整行当术语
+    return out
 
 
 class TranslatePopup(QWidget):
@@ -59,6 +82,7 @@ class TranslatePopup(QWidget):
         self._loading_dots = 0
         self._drag_pos = None
         self._dragged = False  # 用户手动拖过弹窗后，内容重排只改尺寸不再挪位置
+        self._terms: list[tuple[str, str]] = []  # 当前译文的术语表，☆ 链接收藏用
 
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_DeleteOnClose, False)
@@ -95,6 +119,8 @@ class TranslatePopup(QWidget):
 
         self.result_view = QTextBrowser()
         self.result_view.setOpenExternalLinks(False)
+        self.result_view.setOpenLinks(False)  # 术语 ☆ 链接只发 anchorClicked，不做导航
+        self.result_view.anchorClicked.connect(self._on_anchor)
         self.result_view.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.result_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.result_view.setFrameShape(QTextBrowser.NoFrame)
@@ -174,12 +200,13 @@ class TranslatePopup(QWidget):
 
     # ---------------------------------------------------------------- 生命周期
 
-    def show_translation(self, source: str, method: str = "") -> None:
-        """开始一次新的翻译展示。"""
+    def show_translation(self, source: str, method: str = "", force: bool = False) -> None:
+        """开始一次新的翻译展示。force=True 绕过缓存强制重译（重试入口）。"""
         cfg = self._cfg_getter()
         p = palette(cfg.get("popup", {}).get("theme", "dark"))
         self._source = source
         self._translated = ""
+        self._terms = []
         self._dragged = False  # 新一次翻译重新锚定鼠标位置
         self._task_id = -1
         self._placeholder_active = True  # loading 占位在正文区，首块 chunk 需替换而非追加
@@ -208,7 +235,7 @@ class TranslatePopup(QWidget):
         self.activateWindow()
         self._start_auto_close(cfg)
 
-        self._task_id = self._translator.translate(source)
+        self._task_id = self._translator.translate(source, use_cache=not force)
         return self._task_id
 
     def show_result(self, source: str, translated: str) -> None:
@@ -224,7 +251,8 @@ class TranslatePopup(QWidget):
         self.source_label.setText(f"原文\n{html.escape(preview)}")
         self.source_label.setVisible(True)
         self.result_view.setFixedHeight(60)  # 清掉上次残留的 fixed 高度，再由 _fit_height 按内容定
-        self.result_view.setHtml(_format_result(translated or "（无译文）", p))
+        self._terms = _parse_terms(translated or "")
+        self.result_view.setHtml(_format_result(translated or "（无译文）", p, self._terms))
         self._set_status("")
         for b in (self.btn_speak_source, self.btn_speak_trans, self.btn_star,
                   self.btn_copy, self.btn_retry):
@@ -243,6 +271,7 @@ class TranslatePopup(QWidget):
         self._task_id = -1  # 作废进行中的翻译回调
         self._source = ""
         self._translated = ""
+        self._terms = []
         self._placeholder_active = False
         self.source_label.setText("")
         self.source_label.setVisible(False)  # 空文本时 padding+底色仍会渲染，整块隐藏
@@ -319,8 +348,9 @@ class TranslatePopup(QWidget):
             return
         self._loading_timer.stop()
         self._translated = text
+        self._terms = _parse_terms(text)
         p = palette(self._cfg_getter().get("popup", {}).get("theme", "dark"))
-        self.result_view.setHtml(_format_result(text, p))
+        self.result_view.setHtml(_format_result(text, p, self._terms))
         # 译文到位，恢复 loading 期间禁用的按钮
         for b in (self.btn_speak_trans, self.btn_star, self.btn_copy):
             b.setEnabled(True)
@@ -376,6 +406,21 @@ class TranslatePopup(QWidget):
         except Exception as e:
             self._set_status(f"收藏失败：{e}", error=True)
 
+    def _on_anchor(self, url) -> None:
+        """术语行 ☆ 链接：单条收藏 (word=术语, note=含义, context=所在原文)。"""
+        s = url.toString()
+        if not s.startswith("term:"):
+            return
+        try:
+            word, meaning = self._terms[int(s[5:])]
+        except (ValueError, IndexError):
+            return
+        try:
+            database.upsert_word(word, note=meaning, context=self._source.strip()[:200])
+            self._flash_status(f"已收藏术语：{word[:30]}")
+        except Exception as e:
+            self._set_status(f"收藏失败：{e}", error=True)
+
     def _copy(self) -> None:
         text = self._translated or self._source
         QApplication.clipboard().setText(text)
@@ -383,7 +428,7 @@ class TranslatePopup(QWidget):
 
     def _retry(self) -> None:
         if self._source:
-            self.show_translation(self._source)
+            self.show_translation(self._source, force=True)  # 重试强制重译，绕过缓存
 
     def _on_pin_toggled(self, on: bool) -> None:
         self._pinned = on
@@ -466,19 +511,26 @@ def QCursor_pos():
     return QCursor.pos()
 
 
-def _format_result(text: str, p: dict) -> str:
-    """译文完成后渲染：'【术语】' 段落做轻微强调。"""
-    import re
-
+def _format_result(text: str, p: dict, terms: list[tuple[str, str]] | None = None) -> str:
+    """译文完成后渲染：'【术语】' 段落做轻微强调，每行行首 ☆ 链接可单条收藏。"""
     accent, border, body_color = p["accent"], p["border"], p["text"]
-    parts = re.split(r"^【术语】\s*$", text, flags=re.MULTILINE)
+    parts = _TERM_SPLIT.split(text)
     body = html.escape(parts[0].strip())
     if len(parts) > 1:
-        terms = html.escape(parts[1].strip())
+        if terms is None:
+            terms = _parse_terms(text)
+        rows = []
+        for i, (word, meaning) in enumerate(terms):
+            line = html.escape(f"{word} — {meaning}" if meaning else word)
+            rows.append(
+                f"<a href='term:{i}' style='color:{accent};text-decoration:none;'>☆</a> {line}"
+            )
+        terms_html = "<br/>".join(rows)
         body += (
             f"<div style='margin-top:10px;padding-top:8px;border-top:1px solid {border};'>"
             f"<span style='color:{accent};font-weight:600;font-size:12px;'>术语</span>"
-            f"<pre style='white-space:pre-wrap;font-family:inherit;margin:4px 0 0;"
-            f"color:{body_color};font-size:13px;'>{terms}</pre></div>"
+            f"<span style='color:{accent};font-size:12px;'> · 点 ☆ 收藏</span>"
+            f"<div style='white-space:pre-wrap;font-family:inherit;margin:4px 0 0;"
+            f"color:{body_color};font-size:13px;line-height:1.7;'>{terms_html}</div></div>"
         )
     return f"<div style='line-height:1.55;'>{body}</div>"

@@ -8,6 +8,7 @@ from PySide6.QtCore import QEvent, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
@@ -53,6 +54,9 @@ class LibraryWindow(QMainWindow):
         self.ed_search = QLineEdit()
         self.ed_search.setPlaceholderText("搜索…（回车刷新）")
         self.ed_search.returnPressed.connect(self.refresh)
+        self.cb_source = QComboBox()
+        self.cb_source.addItem("全部来源", "")
+        self.cb_source.currentIndexChanged.connect(lambda _i: self.refresh())
         self.btn_refresh = QPushButton("刷新")
         self.btn_refresh.clicked.connect(self.refresh)
         self.btn_export = QPushButton("导出 CSV")
@@ -65,6 +69,7 @@ class LibraryWindow(QMainWindow):
 
         bar = QHBoxLayout()
         bar.addWidget(self.ed_search, 1)
+        bar.addWidget(self.cb_source)
         bar.addWidget(self.btn_refresh)
         bar.addWidget(self.btn_export)
         bar.addWidget(self.btn_delete)
@@ -115,7 +120,9 @@ class LibraryWindow(QMainWindow):
     def refresh(self) -> None:
         search = self.ed_search.text().strip()
         if self.tabs.currentIndex() == 0:
-            rows = database.list_history(search=search)
+            self._sync_source_apps()
+            source = self.cb_source.currentData() or ""
+            rows = database.list_history(search=search, source_app=source)
             self._fill(self.tab_history, rows, ["created_at", "source_text", "translated", "source_app"])
             # 搜索无命中与库真空是两种状态，文案不能混用（否则误以为历史被清空）
             empty = f"没有匹配「{search}」的记录" if search else "暂无翻译历史 · 划词翻译后自动保存"
@@ -125,6 +132,18 @@ class LibraryWindow(QMainWindow):
             self._fill(self.tab_vocab, rows, ["created_at", "word", "note", "context"])
             empty = f"没有匹配「{search}」的记录" if search else "生词本为空 · 在翻译弹窗点「收藏」加入"
             self._show_placeholder(self.tab_vocab, rows, empty)
+
+    def _sync_source_apps(self) -> None:
+        """来源下拉重建（保留当前选择）；只在历史 Tab 显示。"""
+        selected = self.cb_source.currentData() or ""
+        self.cb_source.blockSignals(True)
+        self.cb_source.clear()
+        self.cb_source.addItem("全部来源", "")
+        for app in database.list_source_apps():
+            self.cb_source.addItem(app, app)
+        idx = self.cb_source.findData(selected)
+        self.cb_source.setCurrentIndex(max(0, idx))
+        self.cb_source.blockSignals(False)
 
     def _fill(self, table: QTableWidget, rows: list[dict], cols: list[str]) -> None:
         p = palette(self.theme)
@@ -169,6 +188,7 @@ class LibraryWindow(QMainWindow):
 
     def _on_tab_changed(self, index: int) -> None:
         self.btn_clear.setVisible(index == 0)  # 全量清空只作用于历史；单条删除两个 Tab 都可用
+        self.cb_source.setVisible(index == 0)  # 来源过滤只对历史有意义
         self.refresh()
 
     # ---------------------------------------------------------------- 操作
@@ -192,10 +212,13 @@ class LibraryWindow(QMainWindow):
         if not path:
             return
         try:
-            if self.tabs.currentIndex() == 1:
-                n = vocabulary.export_vocabulary_csv(_p(path), search=self.ed_search.text().strip())
+            on_history = self.tabs.currentIndex() == 0
+            source = (self.cb_source.currentData() or "") if on_history else ""
+            if on_history:
+                n = vocabulary.export_history_csv(
+                    _p(path), search=self.ed_search.text().strip(), source_app=source)
             else:
-                n = vocabulary.export_history_csv(_p(path), search=self.ed_search.text().strip())
+                n = vocabulary.export_vocabulary_csv(_p(path), search=self.ed_search.text().strip())
             QMessageBox.information(self, "导出成功", f"已导出 {n} 条到\n{path}")
         except Exception as e:
             QMessageBox.critical(self, "导出失败", str(e))

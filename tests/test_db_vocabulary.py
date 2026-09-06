@@ -68,3 +68,39 @@ def test_export_csv(tmp_path: Path, monkeypatch):
     content = out.read_text(encoding="utf-8-sig")
     assert "entropy" in content and "多行笔记" in content
     assert "\n多行" not in content.splitlines()[1]  # 换行被压平，CSV 行数不乱
+
+
+def test_history_source_app_filter(tmp_path: Path):
+    db = tmp_path / "t.db"
+    database.init_db(db)
+    database.add_history("hello", "你好", "chrome.exe", db)
+    database.add_history("world", "世界", "acrobat.exe", db)
+    database.add_history("pdf text", "译文", "", db)
+    assert len(database.list_history(source_app="chrome.exe", db_path=db)) == 1
+    assert len(database.list_history(source_app="nonexist.exe", db_path=db)) == 0
+    assert len(database.list_history(search="hello", source_app="chrome.exe", db_path=db)) == 1
+    assert len(database.list_history(search="hello", source_app="acrobat.exe", db_path=db)) == 0
+    assert database.list_source_apps(db) == ["acrobat.exe", "chrome.exe"]  # 新→旧，空串排除
+
+
+def test_translation_cache_roundtrip_and_clear(tmp_path: Path):
+    db = tmp_path / "t.db"
+    database.init_db(db)
+    assert database.get_cached_translation("k1", db) is None
+    database.put_cached_translation("k1", "hello", "你好", db)
+    assert database.get_cached_translation("k1", db) == "你好"
+    database.put_cached_translation("k1", "hello", "你好v2", db)  # 重复写入=更新
+    assert database.get_cached_translation("k1", db) == "你好v2"
+    database.clear_translation_cache(db)
+    assert database.get_cached_translation("k1", db) is None
+
+
+def test_translation_cache_lru_trim(tmp_path: Path):
+    db = tmp_path / "t.db"
+    database.init_db(db)
+    for i in range(database.CACHE_MAX_ROWS + 5):
+        database.put_cached_translation(f"k{i:04d}", f"s{i}", f"r{i}", db)
+    assert database.get_cached_translation("k0000", db) is None  # 最老被修剪
+    assert database.get_cached_translation("k0004", db) is None
+    assert database.get_cached_translation(f"k{database.CACHE_MAX_ROWS + 4:04d}", db) == \
+        f"r{database.CACHE_MAX_ROWS + 4}"  # 最新保留

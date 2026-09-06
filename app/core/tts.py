@@ -19,7 +19,7 @@ import threading
 from PySide6.QtCore import QObject, QUrl, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 
-from app.config import DATA_DIR
+from app.config import DATA_DIR, get_proxy
 
 logger = logging.getLogger("ctrltrans.tts")
 
@@ -43,8 +43,8 @@ class TTSService(QObject):
 
     # ---------------------------------------------------------------- API
 
-    def speak(self, text: str, lang: str = "en") -> None:
-        """lang: 'en' 读原文 / 'zh' 读译文。主线程调用。"""
+    def speak(self, text: str, lang: str = "auto") -> None:
+        """播报文本。lang 仅保留兼容旧调用；音色由 _detect_lang 按内容自选。"""
         text = (text or "").strip()
         if not text:
             return
@@ -67,21 +67,23 @@ class TTSService(QObject):
     # ---------------------------------------------------------------- 合成与播放
 
     def _run(self, text: str, lang: str, engine: str, cfg: dict) -> None:
+        # 音色按内容实际语言选，不信任调用方传入的 lang（读中文原文不该用英文音色）
+        detected = _detect_lang(text)
         if engine == "custom":
             if self._custom_synth(text, cfg):
                 return  # 播放由 play_requested 信号接管
-            self._sapi_speak(text, lang)  # 配置不全 / 合成失败 → 系统语音兜底
+            self._sapi_speak(text, detected)  # 配置不全 / 合成失败 → 系统语音兜底
             return
         if engine in ("auto", "edge"):
-            voice = cfg.get("voice_en" if lang == "en" else "voice_zh", "")
+            voice = cfg.get("voice_zh" if detected == "zh" else "voice_en", "")
             rate = cfg.get("rate", "+0%")
             volume = cfg.get("volume", "+0%")
-            if voice and self._edge_synth(text, voice, rate, volume):
+            if voice and self._edge_synth(text, voice, rate, volume, get_proxy(cfg)):
                 return  # 播放由 play_requested 信号接管
             if engine == "edge":
                 self.state_changed.emit("error:edge-tts 合成失败（可在设置里切换 TTS 引擎为系统语音）")
                 return
-        self._sapi_speak(text, lang)
+        self._sapi_speak(text, detected)
 
     def _custom_synth(self, text: str, cfg: dict) -> bool:
         """OpenAI 兼容 /audio/speech 合成 mp3；失败返回 False（调用方降级 SAPI）。"""
@@ -94,8 +96,14 @@ class TTSService(QObject):
             if not cache.exists():
                 from openai import OpenAI
 
-                TTS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-                client = OpenAI(base_url=base_url, api_key=api_key, timeout=60, max_retries=1)
+                proxy = get_proxy(cfg)
+                kw: dict = {"base_url": base_url, "api_key": api_key,
+                            "timeout": 60, "max_retries": 1}
+                if proxy:
+                    import httpx2
+
+                    kw["http_client"] = httpx2.Client(proxy=proxy)
+                client = OpenAI(**kw)
                 resp = client.audio.speech.create(**kwargs)
                 tmp = cache.with_suffix(".tmp")
                 tmp.write_bytes(resp.content)
@@ -107,7 +115,8 @@ class TTSService(QObject):
             logger.warning("自定义 TTS 合成失败，降级 SAPI：%s", e)
             return False
 
-    def _edge_synth(self, text: str, voice: str, rate: str, volume: str) -> bool:
+    def _edge_synth(self, text: str, voice: str, rate: str, volume: str,
+                    proxy: str = "") -> bool:
         cache_key = hashlib.md5(f"{text}|{voice}|{rate}|{volume}".encode()).hexdigest()
         cache = TTS_CACHE_DIR / f"{cache_key}.mp3"
         try:
@@ -118,7 +127,11 @@ class TTSService(QObject):
                 tmp = cache.with_suffix(".tmp")
 
                 async def _save() -> None:
-                    await edge_tts.Communicate(text, voice, rate=rate, volume=volume).save(str(tmp))
+                    # aiohttp 仅支持 http(s) 代理；socks 代理会抛错走 SAPI 降级
+                    kw = {"proxy": proxy} if proxy else {}
+                    await edge_tts.Communicate(
+                        text, voice, rate=rate, volume=volume, **kw
+                    ).save(str(tmp))
 
                 asyncio.run(_save())
                 tmp.replace(cache)
@@ -164,6 +177,13 @@ def _parse_volume(spec: str) -> float:
         return max(0.0, min(1.0, 1.0 + int(spec.replace("%", "")) / 100.0))
     except (ValueError, TypeError):
         return 1.0
+
+
+def _detect_lang(text: str) -> str:
+    """含任何汉字即按中文选音色——中文音色读英文单词可接受，反向很怪。"""
+    text = text or ""
+    cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+    return "zh" if cjk else "en"
 
 
 def _rate_to_speed(rate: str) -> float:

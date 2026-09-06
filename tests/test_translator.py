@@ -15,6 +15,18 @@ CFG = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _isolate_cache(monkeypatch):
+    """把翻译缓存隔离到内存 dict——防止测试写入真实 ~/.ctrltrans/data.db。"""
+    from app.db import database
+
+    store: dict[str, str] = {}
+    monkeypatch.setattr(database, "get_cached_translation", lambda key: store.get(key))
+    monkeypatch.setattr(database, "put_cached_translation",
+                        lambda key, src, res: store.__setitem__(key, res))
+    return store
+
+
 # ---------------------------------------------------------------- prompt
 
 def test_build_messages_study_mode():
@@ -381,3 +393,52 @@ def test_dispatch_test_result_invokes_callback():
     calls = []
     Translator._dispatch_test_result(calls.append, "msg", True)
     assert calls == ["msg"]
+
+
+# ---------------------------------------------------------------- 翻译缓存
+
+def test_translation_cache_hit_and_force_refresh(qapp, _isolate_cache):
+    """同文本第二次翻译命中缓存不发请求；use_cache=False 绕过强制重译。"""
+    calls = {"n": 0}
+
+    def openai_ctor(**kw):
+        calls["n"] += 1
+
+        class _Completions:
+            def create(self, **_kw):
+                return _Stream([_Event("译")])
+
+        return types.SimpleNamespace(chat=types.SimpleNamespace(completions=_Completions()))
+
+    mod = types.ModuleType("openai")
+    mod.OpenAI = openai_ctor
+    with mock.patch.dict(sys.modules, {"openai": mod}):
+        tr = Translator(lambda: CFG)
+        finals = []
+        tr.finished.connect(lambda s, tid: finals.append(s))
+
+        tr.translate("hello")  # 第一次：真请求并写缓存
+        assert _spin(qapp, lambda: bool(finals))
+        assert calls["n"] == 1 and finals[0] == "译"
+
+        finals.clear()
+        tr.translate("hello")  # 第二次：命中缓存
+        assert _spin(qapp, lambda: bool(finals))
+        assert calls["n"] == 1
+
+        finals.clear()
+        tr.translate("hello", use_cache=False)  # 重试路径：绕过
+        assert _spin(qapp, lambda: bool(finals))
+        assert calls["n"] == 2
+
+
+def test_cache_key_changes_with_translation_settings():
+    from app.core.translator import cache_key
+
+    base = {"provider": {"model": "m1"}, "translate": {"mode": "study", "custom_prompt": ""}}
+    assert cache_key(base, "txt") == cache_key(dict(base), "txt")
+    assert cache_key(base, "txt") != cache_key(base, "txt2")
+    other_model = {"provider": {"model": "m2"}, "translate": base["translate"]}
+    assert cache_key(base, "txt") != cache_key(other_model, "txt")
+    other_mode = {"provider": {"model": "m1"}, "translate": {"mode": "concise", "custom_prompt": ""}}
+    assert cache_key(base, "txt") != cache_key(other_mode, "txt")

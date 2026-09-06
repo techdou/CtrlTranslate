@@ -35,8 +35,8 @@ HISTORY_COLUMNS = ["created_at", "source_text", "translated", "source_app"]
 VOCAB_COLUMNS = ["created_at", "word", "note", "context"]
 
 
-def export_history_csv(path: Path, search: str = "") -> int:
-    rows = database.list_history(search=search)
+def export_history_csv(path: Path, search: str = "", source_app: str = "") -> int:
+    rows = database.list_history(search=search, source_app=source_app)
     export_rows_csv(rows, path, HISTORY_COLUMNS)
     return len(rows)
 

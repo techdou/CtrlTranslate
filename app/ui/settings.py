@@ -212,6 +212,13 @@ class SettingsDialog(QDialog):
         fb_head = QLabel("备用服务（可选）")
         fb_head.setObjectName("sectionTitle")
 
+        net_head = QLabel("网络")
+        net_head.setObjectName("sectionTitle")
+        self.ed_proxy = QLineEdit(self.cfg.get("network", {}).get("proxy", ""))
+        self.ed_proxy.setPlaceholderText("http://127.0.0.1:7890 —— OpenRouter / Gemini 等需代理的服务商；留空 = 直连")
+        lbl_proxy_hint = QLabel("翻译与语音合成出站请求共用；仅支持 http(s) 代理地址")
+        lbl_proxy_hint.setObjectName("dim")
+
         form.addRow("服务商预设", self.cb_preset)
         form.addRow("API 地址", self.ed_base_url)
         form.addRow("模型", self.cb_model)
@@ -228,6 +235,9 @@ class SettingsDialog(QDialog):
         form.addRow("备用 API Key", _wrap_h(fb_key_row))
         form.addRow("", _wrap_h(fb_test_row))
         form.addRow("", lbl_fb_hint)
+        form.addRow(net_head)
+        form.addRow("代理地址", self.ed_proxy)
+        form.addRow("", lbl_proxy_hint)
         return _scroll(page)
 
     def _page_tts(self) -> QWidget:
@@ -410,13 +420,24 @@ class SettingsDialog(QDialog):
         self.btn_open_dir = QPushButton("打开数据目录")
         self.btn_open_dir.clicked.connect(self._open_data_dir)
 
+        self.btn_clear_cache = QPushButton("清空翻译缓存")
+        self.btn_clear_cache.clicked.connect(self._clear_cache)
+
         self.lbl_paths = QLabel("配置、数据库与日志均存于 ~/.ctrltrans/")
         self.lbl_paths.setObjectName("dim")
 
         form.addRow("", self.ck_history)
         form.addRow("数据位置", self.btn_open_dir)
+        form.addRow("翻译缓存", self.btn_clear_cache)
         form.addRow("", self.lbl_paths)
         return _scroll(page)
+
+    def _clear_cache(self) -> None:
+        from app.db import database
+
+        database.clear_translation_cache()
+        self.btn_clear_cache.setText("已清空")
+        self.btn_clear_cache.setEnabled(False)
 
     # ---------------------------------------------------------------- 行为
 
@@ -536,6 +557,7 @@ class SettingsDialog(QDialog):
         po["auto_close_s"] = self.sp_autoclose.value()
 
         cfg["general"]["history_enabled"] = self.ck_history.isChecked()
+        cfg.setdefault("network", {})["proxy"] = self.ed_proxy.text().strip()
         return cfg
 
     def _save(self) -> None:

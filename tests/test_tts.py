@@ -1,6 +1,6 @@
-"""TTS 纯函数单测：语速换算 + 自定义引擎请求组装。"""
+"""TTS 纯函数单测：语速换算 + 自定义引擎请求组装 + 语言检测。"""
 
-from app.core.tts import _custom_request, _rate_to_speed
+from app.core.tts import _custom_request, _detect_lang, _rate_to_speed
 from app.config import DATA_DIR
 
 CUSTOM = {
@@ -24,6 +24,16 @@ def test_rate_to_speed_clamped_and_invalid():
     assert _rate_to_speed("-100%") == 0.25   # 下限截断
     assert _rate_to_speed("bad") == 1.0
     assert _rate_to_speed(None) == 1.0
+
+
+# ---------------------------------------------------------------- 语言检测
+
+def test_detect_lang():
+    assert _detect_lang("你好，今天天气不错") == "zh"
+    assert _detect_lang("Hello, how are you today") == "en"
+    assert _detect_lang("神经网络 neural network 的训练") == "zh"   # 混排含汉字即中文
+    assert _detect_lang("attention is all you need") == "en"
+    assert _detect_lang("") == "en"  # 空文本按英文，调用方已挡掉空串
 
 
 # ---------------------------------------------------------------- 请求组装

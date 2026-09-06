@@ -126,6 +126,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "general": {
         "history_enabled": True,
     },
+    "network": {
+        "proxy": "",                # 如 http://127.0.0.1:7890；留空 = 直连。翻译与 TTS 共用
+    },
 }
 
 
@@ -189,3 +192,8 @@ def resolve_fallback(cfg: dict) -> tuple[str, str, str]:
     if not (base_url and api_key and model):
         return ("", "", "")
     return (base_url, api_key, model)
+
+
+def get_proxy(cfg: dict) -> str:
+    """网络代理（翻译与 TTS 出站请求共用）；空串 = 直连。"""
+    return str(cfg.get("network", {}).get("proxy") or "").strip()

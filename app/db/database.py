@@ -30,8 +30,16 @@ CREATE TABLE IF NOT EXISTS vocabulary (
     context TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
+CREATE TABLE IF NOT EXISTS translation_cache (
+    key TEXT PRIMARY KEY,
+    source_text TEXT,
+    result TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
 CREATE INDEX IF NOT EXISTS idx_history_created ON history(created_at DESC);
 """
+
+CACHE_MAX_ROWS = 500  # 粗 LRU：超限删最旧
 
 
 _init_lock = threading.Lock()
@@ -84,14 +92,21 @@ def add_history(source_text: str, translated: str, source_app: str = "", db_path
 
 
 def list_history(
-    limit: int = 200, offset: int = 0, search: str = "", db_path: Path | None = None
+    limit: int = 200, offset: int = 0, search: str = "", source_app: str = "",
+    db_path: Path | None = None,
 ) -> list[dict[str, Any]]:
     sql = "SELECT * FROM history"
+    conds: list[str] = []
     args: list[Any] = []
     if search:
-        sql += " WHERE source_text LIKE ? OR IFNULL(translated,'') LIKE ?"
+        conds.append("(source_text LIKE ? OR IFNULL(translated,'') LIKE ?)")
         like = f"%{search}%"
         args += [like, like]
+    if source_app:
+        conds.append("source_app = ?")
+        args.append(source_app)
+    if conds:
+        sql += " WHERE " + " AND ".join(conds)
     sql += " ORDER BY id DESC LIMIT ? OFFSET ?"
     args += [limit, offset]
     with _conn(db_path) as conn:
@@ -103,9 +118,51 @@ def delete_history(row_id: int, db_path: Path | None = None) -> None:
         conn.execute("DELETE FROM history WHERE id = ?", (row_id,))
 
 
+def list_source_apps(db_path: Path | None = None) -> list[str]:
+    """历史里出现过的来源应用（去重，新→旧），供过滤下拉用。"""
+    with _conn(db_path) as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT source_app FROM history "
+            "WHERE source_app != '' ORDER BY id DESC"
+        ).fetchall()
+        return [r["source_app"] for r in rows]
+
+
 def clear_history(db_path: Path | None = None) -> None:
     with _conn(db_path) as conn:
         conn.execute("DELETE FROM history")
+
+
+# ---------- 翻译缓存 ----------
+
+def get_cached_translation(key: str, db_path: Path | None = None) -> str | None:
+    with _conn(db_path) as conn:
+        row = conn.execute(
+            "SELECT result FROM translation_cache WHERE key = ?", (key,)
+        ).fetchone()
+        return row["result"] if row else None
+
+
+def put_cached_translation(key: str, source_text: str, result: str,
+                           db_path: Path | None = None) -> None:
+    with _conn(db_path) as conn:
+        conn.execute(
+            "INSERT INTO translation_cache (key, source_text, result) VALUES (?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET result = excluded.result, created_at = datetime('now','localtime')",
+            (key, source_text, result),
+        )
+        # 粗 LRU：超限按 created_at 删最旧（命中会刷新 created_at；rowid 处理同秒并列）
+        conn.execute(
+            "DELETE FROM translation_cache WHERE key IN ("
+            "  SELECT key FROM translation_cache "
+            "  ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET ?)",
+            (CACHE_MAX_ROWS,),
+        )
+
+
+def clear_translation_cache(db_path: Path | None = None) -> None:
+    with _conn(db_path) as conn:
+        conn.execute("DELETE FROM translation_cache")
 
 
 # ---------- 生词本 ----------

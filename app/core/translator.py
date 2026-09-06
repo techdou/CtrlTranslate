@@ -13,7 +13,7 @@ import threading
 
 from PySide6.QtCore import QObject, Signal
 
-from app.config import resolve_endpoint, resolve_fallback
+from app.config import get_proxy, resolve_endpoint, resolve_fallback
 
 logger = logging.getLogger("ctrltrans.translator")
 
@@ -43,6 +43,35 @@ def build_messages(cfg: dict, text: str) -> list[dict]:
     return [{"role": "system", "content": system}, {"role": "user", "content": text}]
 
 
+def cache_key(cfg: dict, text: str) -> str:
+    """缓存键：正文 + 影响译文的所有配置（模型/模式/自定义 prompt）。"""
+    import hashlib
+
+    t = cfg.get("translate", {})
+    raw = "|".join([
+        text,
+        cfg.get("provider", {}).get("model") or "",
+        t.get("mode", "study"),
+        (t.get("custom_prompt") or "").strip(),
+    ])
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+
+def _make_client(endpoint: tuple[str, str, str], timeout: float, max_retries: int,
+                 proxy: str = ""):
+    """OpenAI 兼容客户端；配置了代理时经 httpx2 显式走代理（GUI 启动不继承终端环境变量）。"""
+    from openai import OpenAI
+
+    base_url, api_key, model = endpoint
+    kwargs: dict = {"base_url": base_url, "api_key": api_key,
+                    "timeout": timeout, "max_retries": max_retries}
+    if proxy:
+        import httpx2
+
+        kwargs["http_client"] = httpx2.Client(proxy=proxy)
+    return OpenAI(**kwargs)
+
+
 class Translator(QObject):
     chunk = Signal(str, int)           # 增量文本, task_id
     finished = Signal(str, int)        # 完整译文, task_id
@@ -59,12 +88,12 @@ class Translator(QObject):
 
     # ---------------------------------------------------------------- API
 
-    def translate(self, text: str) -> int:
-        """发起翻译，返回任务号。旧任务会被作废。"""
+    def translate(self, text: str, use_cache: bool = True) -> int:
+        """发起翻译，返回任务号。旧任务会被作废。use_cache=False 强制重译（重试入口）。"""
         with self._lock:
             self._task += 1
             task_id = self._task
-        threading.Thread(target=self._run, args=(text, task_id), daemon=True).start()
+        threading.Thread(target=self._run, args=(text, task_id, use_cache), daemon=True).start()
         return task_id
 
     def cancel_all(self) -> None:
@@ -87,16 +116,14 @@ class Translator(QObject):
             return task_id != self._task
 
     def _stream_once(self, endpoint: tuple[str, str, str], messages: list[dict],
-                     timeout: float, task_id: int) -> str:
+                     timeout: float, task_id: int, proxy: str = "") -> str:
         """对给定服务做一次完整流式请求；成功返回全文。
 
         任务被作废时抛 _TaskCancelled；请求/流读取失败抛原始异常（由调用方
         决定是否 fallback 与错误文案）。chunk 增量实时 emit。
         """
-        from openai import OpenAI
-
-        base_url, api_key, model = endpoint
-        client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout, max_retries=1)
+        client = _make_client(endpoint, timeout, max_retries=1, proxy=proxy)
+        _base, _key, model = endpoint
         try:
             stream = client.chat.completions.create(
                 model=model, messages=messages, stream=True, temperature=0.3,
@@ -128,15 +155,15 @@ class Translator(QObject):
             raise _TaskCancelled
         return "".join(parts)
 
-    def _run(self, text: str, task_id: int) -> None:
+    def _run(self, text: str, task_id: int, use_cache: bool = True) -> None:
         try:
-            self._run_inner(text, task_id)
+            self._run_inner(text, task_id, use_cache)
         except _TaskCancelled:
             pass  # 被新请求作废，静默丢弃
 
-    def _run_inner(self, text: str, task_id: int) -> None:
+    def _run_inner(self, text: str, task_id: int, use_cache: bool = True) -> None:
         try:
-            from openai import OpenAI  # noqa: F401 —— 与 _stream_once 保持同一入口报缺库
+            from openai import OpenAI  # noqa: F401 —— 与 _make_client 保持同一入口报缺库
         except ImportError:
             self.failed.emit("缺少 openai 库，请 pip install openai", task_id)
             return
@@ -150,14 +177,23 @@ class Translator(QObject):
             self.failed.emit("未配置 API Key，请到托盘菜单 → 设置中填写", task_id)
             return
 
+        if use_cache:
+            cached = self._cache_get(cfg, text)
+            if cached is not None:
+                logger.info("cache hit (task %s)", task_id)
+                self.finished.emit(cached, task_id)
+                return
+
         timeout = float(cfg.get("translate", {}).get("timeout_s", 60))
         messages = build_messages(cfg, text)
+        proxy = get_proxy(cfg)
 
         try:
-            result = self._stream_once(primary, messages, timeout, task_id)
+            result = self._stream_once(primary, messages, timeout, task_id, proxy)
         except Exception as e:
             primary_err = e
         else:
+            self._cache_put(cfg, text, result)
             self.finished.emit(result, task_id)
             return
 
@@ -168,7 +204,7 @@ class Translator(QObject):
 
         self.fallback_started.emit(task_id)
         try:
-            result = self._stream_once(fb, messages, timeout, task_id)
+            result = self._stream_once(fb, messages, timeout, task_id, proxy)
         except Exception as e:
             self.failed.emit(
                 f"主服务失败：{self._friendly_error(primary_err, primary[0])}\n"
@@ -177,13 +213,12 @@ class Translator(QObject):
             )
             return
         logger.info("主服务失败已由备用服务完成翻译（task %s）", task_id)
+        self._cache_put(cfg, text, result)
         self.finished.emit(result, task_id)
 
     def _test_run(self, on_ok, on_fail, endpoint: tuple[str, str, str] | None) -> None:
         base_url = ""
         try:
-            from openai import OpenAI
-
             if endpoint is None:
                 endpoint = resolve_endpoint(self._cfg_getter())
             base_url, api_key, model = endpoint
@@ -191,7 +226,8 @@ class Translator(QObject):
                 raise ValueError("API 地址 / 模型未填写")
             if not api_key:
                 raise ValueError("API Key 为空")
-            client = OpenAI(base_url=base_url, api_key=api_key, timeout=20, max_retries=0)
+            proxy = get_proxy(self._cfg_getter())
+            client = _make_client(endpoint, 20, 0, proxy=proxy)
             resp = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": "Reply with the single word: ok"}],
@@ -201,6 +237,27 @@ class Translator(QObject):
             self.test_result.emit(on_ok, f"连通正常（模型返回：{answer[:20]}）", True)
         except Exception as e:
             self.test_result.emit(on_fail, self._friendly_error(e, base_url), False)
+
+    # ---------------------------------------------------------------- 缓存
+
+    @staticmethod
+    def _cache_get(cfg: dict, text: str) -> str | None:
+        try:
+            from app.db import database
+
+            row = database.get_cached_translation(cache_key(cfg, text))
+            return row
+        except Exception:
+            return None  # 缓存层故障不影响翻译主流程
+
+    @staticmethod
+    def _cache_put(cfg: dict, text: str, result: str) -> None:
+        try:
+            from app.db import database
+
+            database.put_cached_translation(cache_key(cfg, text), text, result)
+        except Exception:
+            pass
 
     # ---------------------------------------------------------------- 错误文案
 
