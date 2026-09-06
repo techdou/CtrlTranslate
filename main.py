@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import sys
 
-from PySide6.QtCore import QLockFile, QTimer
-from PySide6.QtGui import QDesktopServices, QIcon, QUrl
+from PySide6.QtCore import QLockFile, QTimer, QUrl
+from PySide6.QtGui import QDesktopServices, QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from app import __version__
@@ -85,7 +85,7 @@ class CtrlApp:
         self.updater.failed.connect(self._on_update_failed)
         self._update_manual = False
         self._release_url = ""
-        self.tray.messageClicked.connect(self._open_release_page)
+        self.tray.message_clicked.connect(self._open_release_page)
 
         self._wire()
 

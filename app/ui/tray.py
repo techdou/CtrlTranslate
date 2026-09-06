@@ -20,6 +20,7 @@ class TrayController(QObject):
     autostart_changed = Signal(bool)
     check_update_requested = Signal()
     about_requested = Signal()
+    message_clicked = Signal()     # 托盘气泡被点击（转发 QSystemTrayIcon.messageClicked）
     quit_requested = Signal()
 
     def __init__(self, icon: QIcon, enabled: bool = True, key: str = "ctrl",
@@ -63,6 +64,7 @@ class TrayController(QObject):
 
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self._on_activated)
+        self.tray.messageClicked.connect(self.message_clicked.emit)
 
     def set_autostart_checked(self, on: bool) -> None:
         self.act_autostart.setChecked(on)
