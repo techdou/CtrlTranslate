@@ -1,6 +1,12 @@
 # CtrlTranslate
 
+[![tests](https://github.com/techdou/CtrlTranslate/actions/workflows/tests.yml/badge.svg)](https://github.com/techdou/CtrlTranslate/actions/workflows/tests.yml)
+[![release](https://img.shields.io/github/v/release/techdou/CtrlTranslate)](https://github.com/techdou/CtrlTranslate/releases/latest)
+[![license](https://img.shields.io/github/license/techdou/CtrlTranslate)](LICENSE)
+
 读英文文献/网页时的桌面划词翻译工具：**选中文字 → 双击 Ctrl → 弹窗流式翻译（大模型）**，支持语音播报、生词本与翻译历史。Windows 平台，常驻系统托盘。
+
+> 在线主页（截图 + 下载）：https://techdou.github.io/CtrlTranslate/
 
 ## 功能特性
 
@@ -13,11 +19,17 @@
 - **双取词引擎自动降级**——优先 UI Automation 直读选中（不碰剪贴板），失败自动改用模拟复制法，并完整保存/恢复你的剪贴板
 - **细节体验**——弹窗跟随鼠标、高度自适应、钉住防误关、失焦自动关闭、深/浅双主题、开机自启（免管理员）、单实例保护；内置代理设置（翻译与 TTS 共用，OpenRouter / Gemini 国内可用）；启动时自动检查 GitHub 新版本
 
+## 界面预览
+
+| 弹窗 · 浅色（学习模式：译文 + 术语表） | 弹窗 · 深色 |
+|---|---|
+| ![浅色主题弹窗](assets/screenshots/popup_light_done.png) | ![深色主题弹窗](assets/screenshots/popup_dark_done.png) |
+
 ## 快速开始
 
-### 方式一：直接用打包版
+### 方式一：直接下载（推荐）
 
-下载/构建 `CtrlTranslate.exe` 后双击运行，程序常驻系统托盘（可能被折叠到托盘溢出区）。
+从 [Releases](https://github.com/techdou/CtrlTranslate/releases/latest) 下载 `CtrlTranslate.exe`（约 70 MB，单文件免安装），双击运行，程序常驻系统托盘（可能被折叠到托盘溢出区）。
 
 自行打包：
 
@@ -80,9 +92,11 @@ app/
   core/            # 热键 / 取词 / 翻译 / TTS / 生词本 / 自启
   ui/              # 翻译弹窗 / 设置 / 历史生词本 / 托盘 / 主题
   db/              # SQLite 存储层
-tests/             # 单元测试
+tests/             # 单元测试（GitHub Actions 自动运行）
 scripts/           # 开发辅助（端到端测试 / 截图 / 图标生成 / 剪贴板修复）
-assets/            # 应用图标
+assets/            # 应用图标 + 界面截图
+site/              # GitHub Pages 项目主页
+.github/workflows/ # CI（测试）/ Pages 部署
 ```
 
 ## 已知边界

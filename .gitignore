@@ -25,6 +25,24 @@ NOTES.md
 *.code-workspace
 *.swp
 
+# AI 编码工具本地配置 / 会话状态（兜底，防误提交）
+.claude/
+.zcode/
+.cursor/
+.windsurf/
+.agents/
+.continue/
+.aider*
+CLAUDE.md
+AGENTS.md
+.claude*
+
+# 本地用户数据 / 运行时产物（真实数据只存 ~/.ctrltrans/）
+*.db
+*.sqlite*
+*.mp3
+ctrltrans/
+
 # 系统杂项
 Thumbs.db
 Desktop.ini

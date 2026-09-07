@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CtrlTranslate — 双击 Ctrl，划词即译</title>
+<meta name="description" content="Windows 桌面划词翻译工具：选中文字，双击 Ctrl，弹窗流式翻译。大模型翻译、术语表、生词本、语音播报。">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: "Segoe UI", "Microsoft YaHei", -apple-system, sans-serif;
+    background: #F6F5F1; color: #26272B; line-height: 1.7;
+  }
+  a { color: #0F766E; }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 0 24px; }
+
+  /* 顶栏 */
+  header {
+    position: sticky; top: 0; z-index: 10;
+    background: rgba(246,245,241,.92); backdrop-filter: blur(8px);
+    border-bottom: 1px solid #DFDED8;
+  }
+  .nav { display: flex; align-items: center; justify-content: space-between; padding: 14px 24px; max-width: 960px; margin: 0 auto; }
+  .brand { font-weight: 700; font-size: 18px; color: #26272B; text-decoration: none; }
+  .brand span { color: #0F766E; }
+  .nav-right { display: flex; gap: 20px; align-items: center; }
+  .nav-right a { text-decoration: none; font-size: 14px; color: #66676F; }
+  .nav-right a:hover { color: #0F766E; }
+  .btn {
+    display: inline-block; background: #0F766E; color: #fff !important;
+    padding: 8px 18px; border-radius: 8px; font-weight: 600; font-size: 14px;
+    text-decoration: none; transition: background .15s;
+  }
+  .btn:hover { background: #0D5F59; }
+
+  /* hero */
+  .hero { padding: 72px 0 48px; text-align: center; }
+  .hero h1 { font-size: 40px; font-weight: 800; letter-spacing: -0.5px; line-height: 1.3; }
+  .hero .sub { font-size: 18px; color: #66676F; margin: 16px auto 0; max-width: 560px; }
+  .flow { display: flex; justify-content: center; align-items: center; gap: 14px; margin: 36px 0; flex-wrap: wrap; }
+  .flow .step { background: #fff; border: 1px solid #DFDED8; border-radius: 10px; padding: 10px 18px; font-size: 15px; }
+  .flow .step b { color: #0F766E; }
+  .flow .arrow { color: #9A9AA3; font-size: 18px; }
+  .cta { display: flex; gap: 16px; justify-content: center; align-items: center; flex-wrap: wrap; }
+  .btn-big { padding: 13px 30px; font-size: 16px; border-radius: 10px; }
+  .cta .meta { font-size: 13px; color: #9A9AA3; }
+
+  /* 截图 */
+  .shots { padding: 24px 0 64px; }
+  .shot-pair { display: flex; gap: 20px; justify-content: center; flex-wrap: wrap; }
+  .shot { text-align: center; }
+  .shot img {
+    max-width: 100%; width: 440px; border-radius: 12px; border: 1px solid #DFDED8;
+    box-shadow: 0 8px 24px rgba(38,39,43,.08);
+  }
+  .shot p { font-size: 13px; color: #9A9AA3; margin-top: 10px; }
+
+  /* 区块 */
+  section { padding: 56px 0; }
+  h2 { font-size: 26px; font-weight: 700; margin-bottom: 8px; }
+  .sec-sub { color: #66676F; margin-bottom: 32px; }
+
+  /* 功能：主次布局 */
+  .features { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 28px; }
+  .feature { background: #fff; border: 1px solid #DFDED8; border-radius: 12px; padding: 20px 22px; }
+  .feature.wide { grid-column: span 2; }
+  .feature h3 { font-size: 16px; margin-bottom: 6px; }
+  .feature p { font-size: 14px; color: #66676F; }
+
+  /* 设置/生词本 */
+  .duo { display: flex; gap: 20px; flex-wrap: wrap; justify-content: center; }
+  .duo .shot img { width: 460px; }
+
+  /* 下载区 */
+  .download { text-align: center; background: #fff; border-top: 1px solid #DFDED8; border-bottom: 1px solid #DFDED8; }
+  .download .meta { font-size: 13px; color: #9A9AA3; margin-top: 14px; }
+  .download .alt { margin-top: 22px; font-size: 14px; color: #66676F; }
+
+  footer { padding: 32px 0 48px; text-align: center; font-size: 13px; color: #9A9AA3; }
+
+  @media (max-width: 640px) {
+    .hero h1 { font-size: 30px; }
+    .features { grid-template-columns: 1fr; }
+    .feature.wide { grid-column: span 1; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="nav">
+    <a class="brand" href="#">Ctrl<span>Translate</span></a>
+    <div class="nav-right">
+      <a href="#features">功能</a>
+      <a href="https://github.com/techdou/CtrlTranslate">GitHub</a>
+      <a class="btn" href="https://github.com/techdou/CtrlTranslate/releases/latest/download/CtrlTranslate.exe">下载</a>
+    </div>
+  </div>
+</header>
+
+<div class="hero wrap">
+  <h1>双击 Ctrl，划词即译</h1>
+  <p class="sub">读英文文献和网页时的桌面翻译工具——大模型流式翻译，带术语表、生词本和语音播报，常驻系统托盘。</p>
+  <div class="flow">
+    <div class="step">选中一段英文</div>
+    <div class="arrow">→</div>
+    <div class="step"><b>快速双击 Ctrl</b></div>
+    <div class="arrow">→</div>
+    <div class="step">弹窗流式出译文</div>
+  </div>
+  <div class="cta">
+    <a class="btn btn-big" href="https://github.com/techdou/CtrlTranslate/releases/latest/download/CtrlTranslate.exe">下载 CtrlTranslate.exe</a>
+    <span class="meta">v1.1.0 · Windows 10/11 · 单文件免安装 · 约 70 MB</span>
+  </div>
+</div>
+
+<div class="shots wrap">
+  <div class="shot-pair">
+    <div class="shot">
+      <img src="screenshots/popup_light_done.png" alt="浅色主题翻译弹窗">
+      <p>浅色主题 · 学习模式（译文 + 术语表）</p>
+    </div>
+    <div class="shot">
+      <img src="screenshots/popup_dark_done.png" alt="深色主题翻译弹窗">
+      <p>深色主题 · 同一弹窗</p>
+    </div>
+  </div>
+</div>
+
+<section id="features">
+  <div class="wrap">
+    <h2>核心功能</h2>
+    <p class="sec-sub">为「读文献、查术语、攒生词」这条路做的取舍，其余功能都往后站。</p>
+    <div class="features">
+      <div class="feature wide">
+        <h3>双击 Ctrl 触发，与快捷键不冲突</h3>
+        <p>全局键盘钩子 + 状态机判定，和 Ctrl+C / Ctrl+V 等组合键互不干扰。判定间隔可调，触发键可换 Alt / Shift，也可整体停用。</p>
+      </div>
+      <div class="feature">
+        <h3>大模型流式翻译</h3>
+        <p>OpenAI 兼容协议，内置智谱 GLM Flash（免费）、DeepSeek、硅基流动、OpenRouter、Gemini 预设；主服务失败自动切换备用服务重发。</p>
+      </div>
+      <div class="feature">
+        <h3>学习模式术语表</h3>
+        <p>译文之外附带专业术语对照，每条术语一键 ☆ 收藏进生词本，读文献场景直接可用。</p>
+      </div>
+      <div class="feature">
+        <h3>生词本 + 翻译历史</h3>
+        <p>SQLite 本地存储，支持搜索、按来源应用筛选、导出 CSV（可直接导入 Anki），双击条目回看原文译文。</p>
+      </div>
+      <div class="feature">
+        <h3>语音播报与翻译缓存</h3>
+        <p>edge-tts 读原文 / 读译文（失败自动降级系统语音）；相同文本重复划词零请求零等待。</p>
+      </div>
+      <div class="feature">
+        <h3>不弄乱你的剪贴板</h3>
+        <p>优先 UI Automation 直读选中文字，不碰剪贴板；降级模拟复制时会完整保存并恢复剪贴板内容。</p>
+      </div>
+      <div class="feature">
+        <h3>细节到位</h3>
+        <p>弹窗跟随鼠标、钉住防误关、深浅双主题、开机自启（免管理员）、单实例保护、内置代理设置、自动检查更新。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>设置与生词本</h2>
+    <p class="sec-sub">服务商、模型、Prompt、触发键、代理、TTS 音色，全在一处配置；生词本按来源可查。</p>
+    <div class="duo">
+      <div class="shot">
+        <img src="screenshots/settings_light_p0.png" alt="设置页（浅色）">
+        <p>设置 · 翻译服务</p>
+      </div>
+      <div class="shot">
+        <img src="screenshots/library_dark.png" alt="生词本（深色）">
+        <p>生词本与历史 · 深色</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="download">
+  <div class="wrap">
+    <h2>开始使用</h2>
+    <p class="sec-sub">下载 exe 双击运行，程序常驻系统托盘（可能被折叠到托盘溢出区）。</p>
+    <a class="btn btn-big" href="https://github.com/techdou/CtrlTranslate/releases/latest/download/CtrlTranslate.exe">下载 CtrlTranslate.exe</a>
+    <p class="meta">首次使用需在 设置 → 翻译服务 填入 API Key（智谱 GLM Flash 免费）</p>
+    <p class="alt">也可以从源码运行：<code>pip install -r requirements.txt</code> 后执行 <code>python main.py</code>，详见 <a href="https://github.com/techdou/CtrlTranslate#readme">README</a>。</p>
+  </div>
+</section>
+
+<footer>
+  CtrlTranslate · <a href="https://github.com/techdou/CtrlTranslate">GitHub</a> · MIT License · 仅支持 Windows
+</footer>
+
+</body>
+</html>
