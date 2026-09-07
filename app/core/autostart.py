@@ -37,12 +37,21 @@ def is_enabled() -> bool:
         return False
 
 
+def _open_run_key(access: int):
+    """打开 HKCU Run 键；精简用户配置文件（如 CI runner）下该键可能缺失，创建之。"""
+    import winreg
+
+    try:
+        return winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY, 0, access)
+    except FileNotFoundError:
+        return winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, _RUN_KEY, 0, access)
+
+
 def set_enabled(on: bool) -> bool:
     try:
         import winreg
 
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY, 0,
-                            winreg.KEY_SET_VALUE) as key:
+        with _open_run_key(winreg.KEY_SET_VALUE) as key:
             if on:
                 winreg.SetValueEx(key, _APP_NAME, 0, winreg.REG_SZ, _command())
             else:
