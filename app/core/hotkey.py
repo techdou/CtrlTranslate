@@ -112,3 +112,48 @@ class HotkeyService(QObject):
         except Exception:
             # 钩子线程里绝不抛异常
             pass
+
+
+class SimpleHotkey(QObject):
+    """单组合热键（keyboard.add_hotkey），OCR 截图等一次性动作用。
+    与 HotkeyService 的全局钩子同库共存；hotkey 为空串 = 不注册。"""
+
+    triggered = Signal()
+
+    def __init__(self, parent: QObject | None = None):
+        super().__init__(parent)
+        self._handle = None
+
+    def start(self, hotkey: str) -> bool:
+        """注册热键（如 "alt+q"）；空串或格式无效返回 False。已注册时先换绑。"""
+        hotkey = (hotkey or "").strip()
+        self.stop()
+        if not hotkey:
+            return False
+        try:
+            import keyboard
+        except ImportError:
+            return False
+        try:
+            self._handle = keyboard.add_hotkey(hotkey, self._fire)
+            return True
+        except Exception:
+            logging.getLogger("ctrltrans.hotkey").warning("invalid hotkey: %r", hotkey)
+            self._handle = None
+            return False
+
+    def stop(self) -> None:
+        if self._handle is None:
+            return
+        try:
+            import keyboard
+            keyboard.remove_hotkey(self._handle)
+        except Exception:
+            pass
+        self._handle = None
+
+    def _fire(self) -> None:
+        try:
+            self.triggered.emit()  # keyboard 回调线程 → Qt 自动排队到主线程
+        except Exception:
+            pass

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import base64
 import sys
 
 from PySide6.QtCore import QLockFile, QTimer, QUrl
@@ -15,8 +16,9 @@ from app import __version__
 from app.config import DATA_DIR, load_config, save_config
 from app.core.autostart import is_enabled as autostart_enabled
 from app.core.autostart import set_enabled as set_autostart
+from app.core.backup import BackupService
 from app.core.capture import TextCaptureService, get_foreground_app
-from app.core.hotkey import HotkeyService
+from app.core.hotkey import HotkeyService, SimpleHotkey
 from app.core.translator import Translator
 from app.core.tts import TTSService
 from app.core.update import UpdateChecker, is_newer
@@ -24,6 +26,7 @@ from app.core.vocabulary import record_history
 from app.db import database
 from app.logger import setup_logger
 from app.ui.library import LibraryWindow
+from app.ui.overlay import ScreenshotOverlay
 from app.ui.popup import TranslatePopup
 from app.ui.settings import SettingsDialog
 from app.ui.theme import build_qss, palette
@@ -64,12 +67,15 @@ class CtrlApp:
             key=self.cfg["trigger"].get("key", "ctrl"),
         )
         self.popup = TranslatePopup(self._cfg, self.tts, self.translator)
+        self.ocr_hotkey = SimpleHotkey()
+        self.backup = BackupService()
 
         # 会话状态
         self._current_source = ""
         self._current_app = ""
         self._library: LibraryWindow | None = None
         self._settings: SettingsDialog | None = None
+        self._overlay: ScreenshotOverlay | None = None
 
         # 托盘
         self.tray = TrayController(
@@ -107,6 +113,8 @@ class CtrlApp:
 
         self.tray.settings_requested.connect(self.open_settings)
         self.tray.library_requested.connect(self.open_library)
+        self.tray.ocr_requested.connect(self.on_ocr)
+        self.ocr_hotkey.triggered.connect(self.on_ocr)
         self.tray.enabled_changed.connect(self.on_enabled_changed)
         self.tray.autostart_changed.connect(self.on_autostart_changed)
         self.tray.check_update_requested.connect(self._check_update)
@@ -119,6 +127,8 @@ class CtrlApp:
         if enabled:
             if not self.hotkey.start():
                 self.tray.notify("启动失败", "全局键盘钩子初始化失败（权限不足？）", 6)
+        self._sync_ocr_hotkey()
+        self.tray.act_ocr.setEnabled(self.cfg.get("ocr", {}).get("enabled", True))
         if not self.cfg["provider"].get("api_key"):
             QTimer.singleShot(
                 900,
@@ -143,6 +153,42 @@ class CtrlApp:
         self._current_source = text
         self.popup.show_translation(text, method)
 
+    # ---------------------------------------------------------------- OCR 截图翻译
+
+    def on_ocr(self) -> None:
+        if not self.cfg.get("ocr", {}).get("enabled", True):
+            return
+        if self._overlay is not None:  # 已在截图流程中，忽略重复触发
+            return
+        self._current_app = "OCR"
+        self._current_source = "（屏幕截图）"
+        self._overlay = ScreenshotOverlay()
+        self._overlay.selected.connect(self._on_ocr_selected)
+        self._overlay.cancelled.connect(self._on_ocr_cancelled)
+        self._overlay.show()
+
+    def _on_ocr_selected(self, png: bytes) -> None:
+        self._discard_overlay()
+        self.popup.show_translation("屏幕截图 OCR", method="ocr")
+        self.translator.translate_image(base64.b64encode(png).decode("ascii"))
+
+    def _on_ocr_cancelled(self) -> None:
+        self._discard_overlay()
+
+    def _discard_overlay(self) -> None:
+        if self._overlay is not None:
+            self._overlay.deleteLater()
+            self._overlay = None
+
+    def _sync_ocr_hotkey(self) -> None:
+        """按当前配置注册/注销 OCR 截图热键（空串 = 禁用）。"""
+        ocr = self.cfg.get("ocr", {})
+        hotkey = ocr.get("hotkey", "") if ocr.get("enabled", True) else ""
+        if hotkey and not self.ocr_hotkey.start(hotkey):
+            self.tray.notify("OCR 热键", f"热键「{hotkey}」注册失败（格式无效或被占用）", 5)
+        elif not hotkey:
+            self.ocr_hotkey.stop()
+
     def on_translated(self, translated: str, task_id: int) -> None:
         self.popup.on_done(translated, task_id)
         if self.popup._task_id != task_id:
@@ -152,6 +198,8 @@ class CtrlApp:
         if tts_cfg.get("enabled") and tts_cfg.get("auto_play"):
             what = tts_cfg.get("auto_play_what", "source")
             text = self._current_source if what == "source" else translated
+            if self._current_app == "OCR":
+                text = translated  # 截图场景没有原文文本，播译文
             QTimer.singleShot(120, lambda: self.tts.speak(text))  # 音色由 TTS 按内容语言自选
 
     # ---------------------------------------------------------------- 窗口
@@ -160,7 +208,7 @@ class CtrlApp:
         if self._settings is not None:
             self._settings.raise_()
             return
-        dlg = SettingsDialog(self.cfg, self.translator)
+        dlg = SettingsDialog(self.cfg, self.translator, backup=self.backup)
         dlg.config_saved.connect(self.on_config_saved)
         dlg.finished.connect(lambda _=0: self._settings_closed())
         self._settings = dlg
@@ -212,7 +260,7 @@ class CtrlApp:
             None,
             "关于 CtrlTranslate",
             f"<b>CtrlTranslate</b> v{__version__}<br><br>"
-            "双击触发键划词翻译 · 流式输出 · 术语收藏 · 生词本导出 Anki<br><br>"
+            "双击触发键划词翻译 · 屏幕截图 OCR · 流式输出 · 术语收藏 · 生词本导出 Anki · WebDAV 备份<br><br>"
             f'<a href="https://github.com/techdou/CtrlTranslate">'
             f"github.com/techdou/CtrlTranslate</a>",
         )
@@ -232,6 +280,8 @@ class CtrlApp:
             self.hotkey.stop()
         self.tray.set_enabled(enabled)
         self.tray.set_trigger_key(new_cfg["trigger"].get("key", "ctrl"))
+        self._sync_ocr_hotkey()
+        self.tray.act_ocr.setEnabled(new_cfg.get("ocr", {}).get("enabled", True))
 
         self.popup._apply_style()
         self.qapp.setStyleSheet(build_qss(palette(new_cfg["popup"]["theme"])))
@@ -257,6 +307,7 @@ class CtrlApp:
 
     def quit(self) -> None:
         self.hotkey.stop()
+        self.ocr_hotkey.stop()
         self.tts.stop()
         self.qapp.quit()
 

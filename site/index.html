@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>CtrlTranslate — 双击 Ctrl，划词即译</title>
-<meta name="description" content="Windows 桌面划词翻译工具：选中文字，双击 Ctrl，弹窗流式翻译。大模型翻译、术语表、生词本、语音播报。">
+<meta name="description" content="Windows 桌面划词翻译工具：选中文字，双击 Ctrl，弹窗流式翻译；图片文字 Alt+Q 截图即译。大模型翻译、术语表、生词本、语音播报、WebDAV 备份。">
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html { scroll-behavior: smooth; }
@@ -101,7 +101,7 @@
 
 <div class="hero wrap">
   <h1>双击 Ctrl，划词即译</h1>
-  <p class="sub">读英文文献和网页时的桌面翻译工具——大模型流式翻译，带术语表、生词本和语音播报，常驻系统托盘。</p>
+  <p class="sub">读英文文献和网页时的桌面翻译工具——大模型流式翻译，带术语表、生词本、语音播报；图片文字 Alt+Q 截图即译，生词历史可备份到坚果云。</p>
   <div class="flow">
     <div class="step">选中一段英文</div>
     <div class="arrow">→</div>
@@ -111,7 +111,7 @@
   </div>
   <div class="cta">
     <a class="btn btn-big" href="https://github.com/techdou/CtrlTranslate/releases/latest/download/CtrlTranslate.exe">下载 CtrlTranslate.exe</a>
-    <span class="meta">v1.1.0 · Windows 10/11 · 单文件免安装 · 约 70 MB</span>
+    <span class="meta">v1.2.0 · Windows 10/11 · 单文件免安装 · 约 70 MB</span>
   </div>
 </div>
 
@@ -142,6 +142,10 @@
         <p>OpenAI 兼容协议，内置智谱 GLM Flash（免费）、DeepSeek、硅基流动、OpenRouter、Gemini 预设；主服务失败自动切换备用服务重发。</p>
       </div>
       <div class="feature">
+        <h3>屏幕截图翻译（OCR）</h3>
+        <p>Alt+Q 框选屏幕任意区域，多模态大模型识别图内文字并翻译——PDF 扫描件、图片、视频字幕都能翻。GLM-4V-Flash 免费，复用翻译 Key。</p>
+      </div>
+      <div class="feature">
         <h3>学习模式术语表</h3>
         <p>译文之外附带专业术语对照，每条术语一键 ☆ 收藏进生词本，读文献场景直接可用。</p>
       </div>
@@ -156,6 +160,10 @@
       <div class="feature">
         <h3>不弄乱你的剪贴板</h3>
         <p>优先 UI Automation 直读选中文字，不碰剪贴板；降级模拟复制时会完整保存并恢复剪贴板内容。</p>
+      </div>
+      <div class="feature">
+        <h3>WebDAV 备份</h3>
+        <p>翻译历史 + 生词本一键备份到坚果云 / Nextcloud / NAS；恢复为合并导入，只增不删，重复自动跳过。</p>
       </div>
       <div class="feature">
         <h3>细节到位</h3>

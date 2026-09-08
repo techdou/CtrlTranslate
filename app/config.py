@@ -100,6 +100,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "prefer_uia": True,         # False = 直接走剪贴板模拟
         "clipboard_wait_ms": 400,
     },
+    "ocr": {
+        "enabled": True,
+        "model": "glm-4v-flash",    # 视觉模型（智谱免费）；地址与 Key 复用 provider 主服务
+        "hotkey": "alt+q",          # OCR 截图热键（keyboard 库格式）；留空 = 禁用
+    },
     "tts": {
         "enabled": True,
         "engine": "auto",           # auto=先 edge-tts 失败转 SAPI / edge / sapi / custom
@@ -128,6 +133,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "network": {
         "proxy": "",                # 如 http://127.0.0.1:7890；留空 = 直连。翻译与 TTS 共用
+    },
+    "webdav": {
+        "url": "",                  # 如 https://dav.jianguoyun.com/dav/
+        "username": "",             # 坚果云 = 账户邮箱
+        "password": "",             # 坚果云 = 应用密码（非登录密码）
+        "remote_dir": "CtrlTranslate",  # 远端目录；备份文件为 <dir>/backup.json
     },
 }
 
@@ -197,3 +208,27 @@ def resolve_fallback(cfg: dict) -> tuple[str, str, str]:
 def get_proxy(cfg: dict) -> str:
     """网络代理（翻译与 TTS 出站请求共用）；空串 = 直连。"""
     return str(cfg.get("network", {}).get("proxy") or "").strip()
+
+
+def resolve_vision_endpoint(cfg: dict) -> tuple[str, str, str]:
+    """OCR 用：(base_url, api_key, vision_model)。地址与 Key 复用 provider 主服务，
+    模型单独配置（文本模型不能接图，不能沿用 provider.model）。"""
+    p = cfg.get("provider", {})
+    return (
+        p.get("base_url") or "",
+        p.get("api_key") or "",
+        str(cfg.get("ocr", {}).get("model") or "").strip(),
+    )
+
+
+def get_webdav(cfg: dict) -> tuple[str, str, str, str]:
+    """WebDAV 备份配置 (url, username, password, remote_dir)；url/账号/密码任一为空
+    = 未配置（全空串元组），调用方据此禁用备份功能。"""
+    w = cfg.get("webdav", {})
+    url = str(w.get("url") or "").strip()
+    user = str(w.get("username") or "").strip()
+    pw = str(w.get("password") or "")
+    remote_dir = str(w.get("remote_dir") or "").strip() or "CtrlTranslate"
+    if not (url and user and pw):
+        return ("", "", "", "")
+    return (url, user, pw, remote_dir)

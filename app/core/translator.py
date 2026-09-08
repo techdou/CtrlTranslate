@@ -13,7 +13,7 @@ import threading
 
 from PySide6.QtCore import QObject, Signal
 
-from app.config import get_proxy, resolve_endpoint, resolve_fallback
+from app.config import get_proxy, resolve_endpoint, resolve_fallback, resolve_vision_endpoint
 
 logger = logging.getLogger("ctrltrans.translator")
 
@@ -34,6 +34,16 @@ STUDY_SYSTEM_PROMPT = """你是一名专业翻译引擎，服务于科研与工�
 CONCISE_SYSTEM_PROMPT = """你是一名专业翻译引擎。把用户给出的文本在中文与英文之间互译
 （英文为主译为中文，中文为主译为英文），只输出译文本身，忠实原意、术语准确，不要任何解释或标记。"""
 
+VISION_SYSTEM_PROMPT = """你是一名专业翻译引擎，服务于科研与工程文献的阅读场景。
+识别图片中的全部文字并在中文与英文之间互译（图内文字以英文为主则译为中文；以中文为主则译为英文）。
+要求：忠实原意、专业术语准确、语句通顺、不增删内容；忽略图片中的非文字元素。
+
+输出格式（严格遵守，不要输出任何额外说明、前后缀或代码块标记）：
+1. 直接给出完整译文；
+2. 若图中文字包含专业术语、缩写、领域黑话或值得学习的表达，在译文后另起一行输出“【术语】”，\
+之后每行一条：原文术语 — 中文含义（一句话解释）；
+3. 没有值得列出的术语就省略第 2 部分。"""
+
 
 def build_messages(cfg: dict, text: str) -> list[dict]:
     translate_cfg = cfg.get("translate", {})
@@ -41,6 +51,17 @@ def build_messages(cfg: dict, text: str) -> list[dict]:
     mode = translate_cfg.get("mode", "study")
     system = custom if custom else (STUDY_SYSTEM_PROMPT if mode == "study" else CONCISE_SYSTEM_PROMPT)
     return [{"role": "system", "content": system}, {"role": "user", "content": text}]
+
+
+def build_vision_messages(image_b64: str) -> list[dict]:
+    """OCR 用：图片 + 翻译指令的多模态消息（OpenAI 协议格式，_stream_once 透传）。"""
+    return [
+        {"role": "system", "content": VISION_SYSTEM_PROMPT},
+        {"role": "user", "content": [
+            {"type": "text", "text": "请识别并翻译图片中的文字。"},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
+        ]},
+    ]
 
 
 def cache_key(cfg: dict, text: str) -> str:
@@ -94,6 +115,16 @@ class Translator(QObject):
             self._task += 1
             task_id = self._task
         threading.Thread(target=self._run, args=(text, task_id, use_cache), daemon=True).start()
+        return task_id
+
+    def translate_image(self, image_b64: str) -> int:
+        """OCR 截图翻译：图片 base64 直发多模态模型。与文本翻译共用 task_id 体系
+        （互相作废）与流式信号；不读缓存（每次截图内容都不同）、不走 fallback
+        （备用服务是文本模型，接图必错）。"""
+        with self._lock:
+            self._task += 1
+            task_id = self._task
+        threading.Thread(target=self._run_image, args=(image_b64, task_id), daemon=True).start()
         return task_id
 
     def cancel_all(self) -> None:
@@ -161,6 +192,12 @@ class Translator(QObject):
         except _TaskCancelled:
             pass  # 被新请求作废，静默丢弃
 
+    def _run_image(self, image_b64: str, task_id: int) -> None:
+        try:
+            self._run_image_inner(image_b64, task_id)
+        except _TaskCancelled:
+            pass
+
     def _run_inner(self, text: str, task_id: int, use_cache: bool = True) -> None:
         try:
             from openai import OpenAI  # noqa: F401 —— 与 _make_client 保持同一入口报缺库
@@ -214,6 +251,35 @@ class Translator(QObject):
             return
         logger.info("主服务失败已由备用服务完成翻译（task %s）", task_id)
         self._cache_put(cfg, text, result)
+        self.finished.emit(result, task_id)
+
+    def _run_image_inner(self, image_b64: str, task_id: int) -> None:
+        try:
+            from openai import OpenAI  # noqa: F401 —— 与 _make_client 保持同一入口报缺库
+        except ImportError:
+            self.failed.emit("缺少 openai 库，请 pip install openai", task_id)
+            return
+
+        cfg = self._cfg_getter()
+        base_url, api_key, model = resolve_vision_endpoint(cfg)
+        if not base_url:
+            self.failed.emit("翻译服务未配置（base_url），请到设置中填写", task_id)
+            return
+        if not api_key:
+            self.failed.emit("未配置 API Key，请到托盘菜单 → 设置中填写", task_id)
+            return
+        if not model:
+            self.failed.emit("未配置 OCR 识别模型，请到 设置 → 触发与取词 → 屏幕截图翻译 填写", task_id)
+            return
+
+        endpoint = (base_url, api_key, model)
+        timeout = float(cfg.get("translate", {}).get("timeout_s", 60))
+        messages = build_vision_messages(image_b64)
+        try:
+            result = self._stream_once(endpoint, messages, timeout, task_id, get_proxy(cfg))
+        except Exception as e:
+            self.failed.emit(self._friendly_error(e, base_url), task_id)
+            return
         self.finished.emit(result, task_id)
 
     def _test_run(self, on_ok, on_fail, endpoint: tuple[str, str, str] | None) -> None:

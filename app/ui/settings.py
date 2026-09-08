@@ -43,11 +43,17 @@ RATES = ["-30%", "-15%", "+0%", "+15%", "+30%"]
 class SettingsDialog(QDialog):
     config_saved = Signal(dict)
 
-    def __init__(self, cfg: dict, translator, parent=None):
+    def __init__(self, cfg: dict, translator, backup=None, parent=None):
         super().__init__(parent)
         self._orig = copy.deepcopy(cfg)
         self.cfg = copy.deepcopy(cfg)
         self._translator = translator
+        self._backup = backup  # BackupService（main 持有）；None 时自建，测试/独立打开用
+        if self._backup is None:
+            from app.core.backup import BackupService
+            self._backup = BackupService()
+        self._backup.action_result.connect(self._on_backup_action)
+        self._backup.snapshot_ready.connect(self._on_snapshot_ready)
         self.setWindowTitle("CtrlTranslate 设置")
         self.resize(760, 540)
         self._build_ui()
@@ -66,6 +72,7 @@ class SettingsDialog(QDialog):
             ("trigger", "触发与取词"),
             ("popup", "弹窗外观"),
             ("data", "历史与数据"),
+            ("backup", "数据备份"),
         ]:
             self.nav.addItem(label)
         self.nav.setCurrentRow(0)
@@ -77,6 +84,7 @@ class SettingsDialog(QDialog):
         self.pages.addWidget(self._page_trigger())
         self.pages.addWidget(self._page_popup())
         self.pages.addWidget(self._page_data())
+        self.pages.addWidget(self._page_backup())
 
         root.addWidget(self.nav)
         root.addWidget(self.pages, 1)
@@ -365,12 +373,36 @@ class SettingsDialog(QDialog):
         self.sp_max_chars.setSingleStep(100)
         self.sp_max_chars.setValue(self.cfg["translate"].get("max_chars", 3000))
 
+        # ---- 屏幕截图翻译（OCR） ----
+        ocr = self.cfg.get("ocr", {})
+        ocr_head = QLabel("屏幕截图翻译（OCR）")
+        ocr_head.setObjectName("sectionTitle")
+
+        self.ck_ocr = QCheckBox("启用（托盘菜单 + 热键框选屏幕区域，识别并翻译图内文字）")
+        self.ck_ocr.setChecked(ocr.get("enabled", True))
+
+        self.cb_ocr_model = QComboBox()
+        self.cb_ocr_model.setEditable(True)
+        self.cb_ocr_model.addItems(["glm-4v-flash", "glm-4v-plus", "gpt-4o-mini", "gemini-2.0-flash"])
+        self.cb_ocr_model.setCurrentText(ocr.get("model", "glm-4v-flash"))
+
+        self.ed_ocr_hotkey = QLineEdit(ocr.get("hotkey", "alt+q"))
+        self.ed_ocr_hotkey.setPlaceholderText("如 alt+q；留空 = 禁用热键（仍可从托盘菜单触发）")
+        lbl_ocr_hint = QLabel("识别模型须支持图片输入；地址与 API Key 复用上方翻译服务。"
+                              "智谱 glm-4v-flash 免费，填了翻译 Key 即可直接用")
+        lbl_ocr_hint.setObjectName("dim")
+
         form.addRow("", self.ck_hotkey)
         form.addRow("触发键", self.cb_key)
         form.addRow("双击判定间隔", _hbox(self.sl_interval, self.lbl_interval))
         form.addRow("", self.ck_uia)
         form.addRow("复制法等待上限", self.sp_clip_wait)
         form.addRow("单次翻译长度上限（字符）", self.sp_max_chars)
+        form.addRow(ocr_head)
+        form.addRow("", self.ck_ocr)
+        form.addRow("识别模型", self.cb_ocr_model)
+        form.addRow("截图热键", self.ed_ocr_hotkey)
+        form.addRow("", lbl_ocr_hint)
         return _scroll(page)
 
     def _page_popup(self) -> QWidget:
@@ -438,6 +470,160 @@ class SettingsDialog(QDialog):
         database.clear_translation_cache()
         self.btn_clear_cache.setText("已清空")
         self.btn_clear_cache.setEnabled(False)
+
+    # ---------------------------------------------------------------- WebDAV 备份
+
+    def _page_backup(self) -> QWidget:
+        w = self.cfg.get("webdav", {})
+        form, page = self._page("数据备份（WebDAV）")
+
+        self.ed_wd_url = QLineEdit(w.get("url", ""))
+        self.ed_wd_url.setPlaceholderText("如 https://dav.jianguoyun.com/dav/（坚果云）")
+        self.ed_wd_user = QLineEdit(w.get("username", ""))
+        self.ed_wd_user.setPlaceholderText("坚果云 = 账户邮箱")
+        self.ed_wd_password = QLineEdit(w.get("password", ""))
+        self.ed_wd_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.btn_wd_eye = QPushButton("显示")
+        self.btn_wd_eye.setCheckable(True)
+        self.btn_wd_eye.setFixedWidth(52)
+        self.btn_wd_eye.toggled.connect(
+            lambda on: self.ed_wd_password.setEchoMode(
+                QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password
+            )
+        )
+        wd_pw_row = QHBoxLayout()
+        wd_pw_row.addWidget(self.ed_wd_password, 1)
+        wd_pw_row.addWidget(self.btn_wd_eye)
+
+        self.ed_wd_dir = QLineEdit(w.get("remote_dir", "CtrlTranslate"))
+        self.ed_wd_dir.setPlaceholderText("远端目录名，默认 CtrlTranslate")
+
+        self.btn_wd_test = QPushButton("测试连接")
+        self.lbl_wd_test = QLabel("")
+        self.lbl_wd_test.setObjectName("dim")
+        self.btn_wd_test.clicked.connect(self._test_webdav)
+        wd_test_row = QHBoxLayout()
+        wd_test_row.addWidget(self.btn_wd_test)
+        wd_test_row.addWidget(self.lbl_wd_test, 1)
+
+        self.btn_wd_backup = QPushButton("立即备份")
+        self.lbl_wd_backup = QLabel("")
+        self.lbl_wd_backup.setObjectName("dim")
+        self.btn_wd_backup.clicked.connect(self._backup_now)
+        wd_backup_row = QHBoxLayout()
+        wd_backup_row.addWidget(self.btn_wd_backup)
+        wd_backup_row.addWidget(self.lbl_wd_backup, 1)
+
+        self.btn_wd_restore = QPushButton("从备份恢复…")
+        self.btn_wd_restore.clicked.connect(self._restore_now)
+
+        lbl_wd_hint = QLabel(
+            "备份内容 = 翻译历史 + 生词本（不含翻译缓存），远端为单个 backup.json，"
+            "每次备份覆盖（坚果云网页端保留历史版本可回滚）。恢复是合并导入："
+            "只增不删，重复条目自动跳过。\n"
+            "坚果云：账户信息 → 安全选项 → 添加应用密码，密码栏填它（不是登录密码）。"
+            "其他标准 WebDAV（Nextcloud / NAS）同样可用。"
+        )
+        lbl_wd_hint.setObjectName("dim")
+        lbl_wd_hint.setWordWrap(True)
+
+        form.addRow("服务器地址", self.ed_wd_url)
+        form.addRow("账号", self.ed_wd_user)
+        form.addRow("密码（应用密码）", _wrap_h(wd_pw_row))
+        form.addRow("远端目录", self.ed_wd_dir)
+        form.addRow("", _wrap_h(wd_test_row))
+        form.addRow("", _wrap_h(wd_backup_row))
+        form.addRow("恢复", self.btn_wd_restore)
+        form.addRow("", lbl_wd_hint)
+        return _scroll(page)
+
+    def _wcfg_from_form(self) -> tuple[str, str, str, str]:
+        """用表单当前值组 WebDAV 配置（未保存的账号密码也要能测）。"""
+        url = self.ed_wd_url.text().strip()
+        user = self.ed_wd_user.text().strip()
+        pw = self.ed_wd_password.text()
+        remote_dir = self.ed_wd_dir.text().strip() or "CtrlTranslate"
+        if not (url and user and pw):
+            raise ValueError("服务器地址 / 账号 / 密码还没填完整")
+        return (url, user, pw, remote_dir)
+
+    def _test_webdav(self) -> None:
+        try:
+            wcfg = self._wcfg_from_form()
+        except ValueError as e:
+            self.lbl_wd_test.setText(str(e))
+            return
+        self.lbl_wd_test.setText("测试中…")
+        self.btn_wd_test.setEnabled(False)
+        self._backup.test_now(wcfg, self._proxy_from_cfg())
+
+    def _backup_now(self) -> None:
+        try:
+            wcfg = self._wcfg_from_form()
+        except ValueError as e:
+            self.lbl_wd_backup.setText(str(e))
+            return
+        self.lbl_wd_backup.setText("备份中…")
+        self.btn_wd_backup.setEnabled(False)
+        self._backup.backup_now(wcfg, self._proxy_from_cfg())
+
+    def _restore_now(self) -> None:
+        try:
+            wcfg = self._wcfg_from_form()
+        except ValueError as e:
+            self.lbl_wd_backup.setText(str(e))
+            return
+        self.btn_wd_restore.setEnabled(False)
+        self.btn_wd_restore.setText("读取远端备份…")
+        self._backup.fetch_snapshot(wcfg, self._proxy_from_cfg())
+
+    def _proxy_from_cfg(self) -> str:
+        return str(self.cfg.get("network", {}).get("proxy") or "").strip()
+
+    def _set_result_label(self, label: QLabel, msg: str, ok: bool) -> None:
+        from app.ui.theme import palette as _palette
+
+        label.setText(msg)
+        label.setStyleSheet(
+            f"color: {_palette(self.cfg['popup']['theme'])['accent' if ok else 'error']}"
+        )
+
+    def _on_backup_action(self, action: str, ok: bool, msg: str) -> None:
+        if action == "test":
+            self.btn_wd_test.setEnabled(True)
+            self._set_result_label(self.lbl_wd_test, msg, ok)
+        elif action == "backup":
+            self.btn_wd_backup.setEnabled(True)
+            self._set_result_label(self.lbl_wd_backup, msg, ok)
+        elif action == "restore_fetch":
+            self.btn_wd_restore.setEnabled(True)
+            self.btn_wd_restore.setText("从备份恢复…")
+            self._set_result_label(self.lbl_wd_backup, msg, ok)
+
+    def _on_snapshot_ready(self, snap: dict) -> None:
+        from PySide6.QtWidgets import QMessageBox
+
+        from app.core.backup import apply_snapshot, snapshot_summary
+
+        self.btn_wd_restore.setEnabled(True)
+        self.btn_wd_restore.setText("从备份恢复…")
+        answer = QMessageBox.question(
+            self, "从备份恢复",
+            f"{snapshot_summary(snap)}\n\n恢复为合并导入：只增不删，重复条目自动跳过。继续？",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            stats = apply_snapshot(snap)
+        except Exception as e:
+            self._set_result_label(self.lbl_wd_backup, f"恢复失败：{e}", False)
+            return
+        self._set_result_label(
+            self.lbl_wd_backup,
+            f"已导入 {stats['history_imported']} 条历史、{stats['vocabulary_imported']} 个生词"
+            f"（跳过已有历史 {stats['history_skipped']} 条）",
+            True,
+        )
 
     # ---------------------------------------------------------------- 行为
 
@@ -549,6 +735,11 @@ class SettingsDialog(QDialog):
         cfg["capture"]["prefer_uia"] = self.ck_uia.isChecked()
         cfg["capture"]["clipboard_wait_ms"] = self.sp_clip_wait.value()
 
+        o = cfg.setdefault("ocr", {})
+        o["enabled"] = self.ck_ocr.isChecked()
+        o["model"] = self.cb_ocr_model.currentText().strip()
+        o["hotkey"] = self.ed_ocr_hotkey.text().strip()
+
         po = cfg["popup"]
         po["theme"] = self.cb_theme.currentData()
         po["font_size"] = self.sp_font.value()
@@ -558,6 +749,12 @@ class SettingsDialog(QDialog):
 
         cfg["general"]["history_enabled"] = self.ck_history.isChecked()
         cfg.setdefault("network", {})["proxy"] = self.ed_proxy.text().strip()
+
+        w = cfg.setdefault("webdav", {})
+        w["url"] = self.ed_wd_url.text().strip()
+        w["username"] = self.ed_wd_user.text().strip()
+        w["password"] = self.ed_wd_password.text().strip()
+        w["remote_dir"] = self.ed_wd_dir.text().strip() or "CtrlTranslate"
         return cfg
 
     def _save(self) -> None:

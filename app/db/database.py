@@ -133,6 +133,76 @@ def clear_history(db_path: Path | None = None) -> None:
         conn.execute("DELETE FROM history")
 
 
+# ---------- 备份（全量导出 / 合并导入） ----------
+
+def export_all_history(db_path: Path | None = None) -> list[dict[str, Any]]:
+    """全量历史（list_history 有分页上限，备份需要不带 limit 的读取）。"""
+    with _conn(db_path) as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT source_text, translated, source_app, created_at FROM history ORDER BY id"
+        ).fetchall()]
+
+
+def import_history(rows: list[dict[str, Any]], db_path: Path | None = None) -> tuple[int, int]:
+    """合并导入历史（显式保留 created_at）。按 (source_text, translated, created_at)
+    去重——同一份快照恢复两次不会翻倍。返回 (导入数, 跳过数)。"""
+    with _conn(db_path) as conn:
+        existing = {
+            (r["source_text"], r["translated"], r["created_at"])
+            for r in conn.execute(
+                "SELECT source_text, translated, created_at FROM history"
+            ).fetchall()
+        }
+        imported = skipped = 0
+        for r in rows:
+            key = (str(r.get("source_text") or ""), str(r.get("translated") or ""),
+                   str(r.get("created_at") or ""))
+            if not key[0] or key in existing:
+                skipped += 1
+                continue
+            conn.execute(
+                "INSERT INTO history (source_text, translated, source_app, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (key[0], key[1], str(r.get("source_app") or ""), key[2] or None),
+            )
+            existing.add(key)
+            imported += 1
+        return (imported, skipped)
+
+
+def import_vocabulary(rows: list[dict[str, Any]], db_path: Path | None = None) -> int:
+    """合并导入生词本：新词按快照的 created_at 原样入库；已存在的词只在本地
+    note/context 为空时补全，不动本地首次收藏时间。返回新增词数。"""
+    with _conn(db_path) as conn:
+        existing = {
+            r["word"] for r in conn.execute("SELECT word FROM vocabulary").fetchall()
+        }
+        imported = 0
+        for r in rows:
+            word = str(r.get("word") or "").strip()
+            if not word:
+                continue
+            note = str(r.get("note") or "")
+            context = str(r.get("context") or "")
+            created_at = str(r.get("created_at") or "") or None
+            if word in existing:
+                conn.execute(
+                    "UPDATE vocabulary SET "
+                    "note = CASE WHEN note = '' AND ? != '' THEN ? ELSE note END, "
+                    "context = CASE WHEN context = '' AND ? != '' THEN ? ELSE context END "
+                    "WHERE word = ?",
+                    (note, note, context, context, word),
+                )
+                continue
+            conn.execute(
+                "INSERT INTO vocabulary (word, note, context, created_at) VALUES (?, ?, ?, ?)",
+                (word, note, context, created_at),
+            )
+            existing.add(word)
+            imported += 1
+        return imported
+
+
 # ---------- 翻译缓存 ----------
 
 def get_cached_translation(key: str, db_path: Path | None = None) -> str | None:
