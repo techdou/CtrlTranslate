@@ -1,4 +1,4 @@
-"""翻译弹窗：无边框置顶，跟随鼠标，流式打字机渲染，失焦自动关闭。
+"""翻译弹窗：无边框置顶，锚定取词时的鼠标位置（流式重排不追实时鼠标），流式打字机渲染，失焦自动关闭。
 
 交互契约：
 - show_translation(source) 后由 Translator 信号驱动 on_chunk/on_done/on_error
@@ -15,7 +15,7 @@ import logging
 import re
 
 from PySide6.QtCore import QEvent, Qt, QTimer
-from PySide6.QtGui import QGuiApplication, QTextCursor
+from PySide6.QtGui import QCursor, QGuiApplication, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -33,7 +33,9 @@ from app.ui.theme import palette
 logger = logging.getLogger("ctrltrans.popup")
 
 SOURCE_PREVIEW_LIMIT = 120
-RESULT_MAX_GROW = 360
+CURSOR_OFFSET = 24  # 弹窗离锚点（取词时鼠标位置）的偏移，右下与翻转侧同距
+RESULT_GROW_RATIO = 0.45  # 译文区高度上限 = 锚点屏可用高度的比例；小屏 120px 兜底
+GROW_THROTTLE_MS = 300  # 流式输出期间窗口跟随长高的最小间隔，防逐 chunk 抖动
 _TERM_SPLIT = re.compile(r"^【术语】\s*$", re.MULTILINE)
 _TERM_SEPS = [" — ", "—", " - ", " – ", "-"]
 
@@ -82,6 +84,11 @@ class TranslatePopup(QWidget):
         self._loading_dots = 0
         self._drag_pos = None
         self._dragged = False  # 用户手动拖过弹窗后，内容重排只改尺寸不再挪位置
+        self._anchor = None  # 本次展示的锚点（取词瞬间的鼠标位置），重排围绕它而非实时鼠标
+        self._grow_timer = QTimer(self)
+        self._grow_timer.setSingleShot(True)
+        self._grow_timer.setInterval(GROW_THROTTLE_MS)
+        self._grow_timer.timeout.connect(self._fit_height)
         self._terms: list[tuple[str, str]] = []  # 当前译文的术语表，☆ 链接收藏用
 
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
@@ -200,6 +207,15 @@ class TranslatePopup(QWidget):
 
     # ---------------------------------------------------------------- 生命周期
 
+    def _reset_for_show(self) -> None:
+        """三种展示入口的公共复位：作废回调、解除拖拽冻结、记录本次锚点。
+
+        锚点固定后，译文流式/完成时的重排都围绕取词瞬间的鼠标位置，
+        不再跟踪实时鼠标——避免用户移向按钮时弹窗跳位。"""
+        self._task_id = -1
+        self._dragged = False
+        self._anchor = QCursor.pos()
+
     def show_translation(self, source: str, method: str = "", force: bool = False) -> None:
         """开始一次新的翻译展示。force=True 绕过缓存强制重译（重试入口）。"""
         cfg = self._cfg_getter()
@@ -207,8 +223,7 @@ class TranslatePopup(QWidget):
         self._source = source
         self._translated = ""
         self._terms = []
-        self._dragged = False  # 新一次翻译重新锚定鼠标位置
-        self._task_id = -1
+        self._reset_for_show()
         self._placeholder_active = True  # loading 占位在正文区，首块 chunk 需替换而非追加
         preview = source[:SOURCE_PREVIEW_LIMIT] + ("…" if len(source) > SOURCE_PREVIEW_LIMIT else "")
         via = " · 取词：UIA" if method == "uia" else ""
@@ -228,7 +243,7 @@ class TranslatePopup(QWidget):
         for b in (self.btn_speak_trans, self.btn_star, self.btn_copy):
             b.setEnabled(False)
 
-        self._place_near_cursor()
+        self._place_near_anchor()
         self.show()
         self.raise_()
         logger.info("popup shown: winId=%s visible=%s", self.winId(), self.isVisible())
@@ -244,8 +259,7 @@ class TranslatePopup(QWidget):
         p = palette(cfg.get("popup", {}).get("theme", "dark"))
         self._source = source
         self._translated = translated
-        self._task_id = -1  # 作废进行中的翻译回调
-        self._dragged = False
+        self._reset_for_show()
         self._placeholder_active = False
         preview = source[:SOURCE_PREVIEW_LIMIT] + ("…" if len(source) > SOURCE_PREVIEW_LIMIT else "")
         self.source_label.setText(f"原文\n{html.escape(preview)}")
@@ -268,7 +282,7 @@ class TranslatePopup(QWidget):
     def show_message(self, message: str, error: bool = True) -> None:
         """不发起翻译，仅弹出一条提示（如取词/翻译失败）。"""
         p = palette(self._cfg_getter().get("popup", {}).get("theme", "dark"))
-        self._task_id = -1  # 作废进行中的翻译回调
+        self._reset_for_show()  # 含 _dragged 复位：错误提示也要弹回鼠标旁，而非上次拖放的旧位置
         self._source = ""
         self._translated = ""
         self._terms = []
@@ -290,19 +304,18 @@ class TranslatePopup(QWidget):
         self.raise_()
         self.activateWindow()
 
-    def _place_near_cursor(self) -> None:
-        pos = QCursor_pos()
-        screen = QGuiApplication.screenAt(pos) or QGuiApplication.primaryScreen()
-        avail = screen.availableGeometry()
+    def _avail_geometry(self):
+        """锚点所在屏的可用区域（已扣任务栏）；锚点屏失效时回退主屏。"""
+        screen = QGuiApplication.screenAt(self._anchor) or QGuiApplication.primaryScreen()
+        return screen.availableGeometry()
+
+    def _place_near_anchor(self) -> None:
+        avail = self._avail_geometry()
         self.adjustSize()
         # 高度跟 sizeHint 走（译文区已按内容 fixed），不再设地板值——短内容小窗口
         w, h = self.width(), min(self.sizeHint().height(), int(avail.height() * 0.6))
         self.resize(w, h)
-        x, y = pos.x() + 18, pos.y() + 18
-        if x + w > avail.right():
-            x = pos.x() - w - 12
-        if y + h > avail.bottom():
-            y = max(avail.top(), pos.y() - h - 12)
+        x, y = _compute_placement(self._anchor.x(), self._anchor.y(), w, h, avail)
         self.move(x, y)
 
     def _fit_height(self) -> None:
@@ -310,12 +323,13 @@ class TranslatePopup(QWidget):
         doc = self.result_view.document()
         doc.setTextWidth(self.result_view.viewport().width())  # 同步触发重新排版
         text_h = int(doc.size().height()) + 8
+        max_grow = max(int(self._avail_geometry().height() * RESULT_GROW_RATIO), 120)
         # fixed 而非 minimum：sizeHint 不再被 QTextBrowser 默认值撑大，窗口才收得回去
-        self.result_view.setFixedHeight(min(max(text_h, 60), RESULT_MAX_GROW))
+        self.result_view.setFixedHeight(min(max(text_h, 60), max_grow))
         if self._dragged:
             self.adjustSize()  # 只按新尺寸重算窗口，左上角留在用户拖放的位置
         else:
-            self._place_near_cursor()
+            self._place_near_anchor()
 
     def _start_auto_close(self, cfg: dict) -> None:
         secs = int(cfg.get("popup", {}).get("auto_close_s", 0))
@@ -342,11 +356,15 @@ class TranslatePopup(QWidget):
             self.result_view.insertPlainText(piece)
         if at_bottom:
             sb.setValue(sb.maximum())
+        # 流式期间窗口跟随长高，但按节流间隔收着长——不逐 chunk 重排抖动
+        if not self._grow_timer.isActive():
+            self._grow_timer.start()
 
     def on_done(self, text: str, task_id: int) -> None:
         if task_id != self._task_id:
             return
         self._loading_timer.stop()
+        self._grow_timer.stop()  # 完成态直接重排，作废可能还挂着的节流重排
         self._translated = text
         self._terms = _parse_terms(text)
         p = palette(self._cfg_getter().get("popup", {}).get("theme", "dark"))
@@ -483,6 +501,15 @@ class TranslatePopup(QWidget):
 
     def mouseReleaseEvent(self, event) -> None:
         self._drag_pos = None
+        if self._dragged:
+            # 拖出屏外时拉回：按窗口中心找屏，夹进该屏可用区
+            geo = self.frameGeometry()
+            screen = (QGuiApplication.screenAt(geo.center())
+                      or QGuiApplication.primaryScreen())
+            x, y = _clamp_into(geo.left(), geo.top(),
+                               geo.width(), geo.height(), screen.availableGeometry())
+            if (x, y) != (geo.left(), geo.top()):
+                self.move(x, y)
         super().mouseReleaseEvent(event)
 
     def eventFilter(self, obj, event) -> bool:
@@ -501,14 +528,26 @@ class TranslatePopup(QWidget):
         self._auto_close_timer.stop()
         self._status_timer.stop()
         self._loading_timer.stop()
+        self._grow_timer.stop()
         self._tts.stop()
         super().hideEvent(event)
 
 
-def QCursor_pos():
-    from PySide6.QtGui import QCursor
+def _compute_placement(ax: int, ay: int, w: int, h: int, avail) -> tuple[int, int]:
+    """锚点右下优先放置，右/底出屏翻转到锚点左侧/上方。纯几何，avail 为 QRect。"""
+    x, y = ax + CURSOR_OFFSET, ay + CURSOR_OFFSET
+    if x + w > avail.right():
+        x = ax - w - CURSOR_OFFSET
+    if y + h > avail.bottom():
+        y = max(avail.top(), ay - h - CURSOR_OFFSET)
+    return x, y
 
-    return QCursor.pos()
+
+def _clamp_into(ax: int, ay: int, w: int, h: int, avail) -> tuple[int, int]:
+    """把 (ax, ay) 左上角、w×h 的矩形夹回 avail 内；矩形本身超出时贴左上。纯几何。"""
+    x = max(avail.left(), min(ax, avail.right() - w))
+    y = max(avail.top(), min(ay, avail.bottom() - h))
+    return x, y
 
 
 def _format_result(text: str, p: dict, terms: list[tuple[str, str]] | None = None) -> str:
