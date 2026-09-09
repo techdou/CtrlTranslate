@@ -38,6 +38,7 @@ VOICE_EN = [
     "en-GB-SoniaNeural", "en-US-RyanNeural",
 ]
 RATES = ["-30%", "-15%", "+0%", "+15%", "+30%"]
+VOLUMES = ["-50%", "-30%", "-15%", "+0%"]  # edge-tts 音量为 ±N% 格式，放大无效只提供降档
 
 
 class SettingsDialog(QDialog):
@@ -222,6 +223,12 @@ class SettingsDialog(QDialog):
 
         net_head = QLabel("网络")
         net_head.setObjectName("sectionTitle")
+        self.sp_timeout = QSpinBox()
+        self.sp_timeout.setRange(10, 300)
+        self.sp_timeout.setSuffix(" 秒")
+        self.sp_timeout.setValue(int(self.cfg["translate"].get("timeout_s", 60)))
+        lbl_timeout_hint = QLabel("单次翻译/OCR 请求的超时上限；慢代理或长文可调大")
+        lbl_timeout_hint.setObjectName("dim")
         self.ed_proxy = QLineEdit(self.cfg.get("network", {}).get("proxy", ""))
         self.ed_proxy.setPlaceholderText("http://127.0.0.1:7890 —— OpenRouter / Gemini 等需代理的服务商；留空 = 直连")
         lbl_proxy_hint = QLabel("翻译与语音合成出站请求共用；仅支持 http(s) 代理地址")
@@ -244,6 +251,8 @@ class SettingsDialog(QDialog):
         form.addRow("", _wrap_h(fb_test_row))
         form.addRow("", lbl_fb_hint)
         form.addRow(net_head)
+        form.addRow("请求超时", self.sp_timeout)
+        form.addRow("", lbl_timeout_hint)
         form.addRow("代理地址", self.ed_proxy)
         form.addRow("", lbl_proxy_hint)
         return _scroll(page)
@@ -297,6 +306,10 @@ class SettingsDialog(QDialog):
         self.cb_rate.addItems(RATES)
         self.cb_rate.setCurrentText(t.get("rate", "+0%"))
 
+        self.cb_volume = QComboBox()
+        self.cb_volume.addItems(VOLUMES)
+        self.cb_volume.setCurrentText(t.get("volume", "+0%"))
+
         self.ck_autoplay = QCheckBox("翻译完成后自动播报")
         self.ck_autoplay.setChecked(t.get("auto_play", False))
         self.cb_autoplay_what = QComboBox()
@@ -306,7 +319,7 @@ class SettingsDialog(QDialog):
         self.ck_tts.toggled.connect(self._sync_tts_enabled)
         self.cb_engine.currentIndexChanged.connect(
             lambda _i: self._sync_engine_fields(form))
-        for w in (self.cb_engine, self.cb_voice_zh, self.cb_voice_en, self.cb_rate,
+        for w in (self.cb_engine, self.cb_voice_zh, self.cb_voice_en, self.cb_rate, self.cb_volume,
                   self.ed_tts_url, self.ed_tts_model, self.ed_tts_voice, self.ed_tts_key,
                   self.btn_tts_eye, self.ck_autoplay, self.cb_autoplay_what):
             w.setEnabled(self.ck_tts.isChecked())
@@ -320,6 +333,7 @@ class SettingsDialog(QDialog):
         form.addRow("TTS 音色", self.ed_tts_voice)
         form.addRow("TTS API Key", _wrap_h(tts_key_row))
         form.addRow("语速", self.cb_rate)
+        form.addRow("音量", self.cb_volume)
         form.addRow("", self.ck_autoplay)
         form.addRow("自动播报内容", self.cb_autoplay_what)
         self._sync_engine_fields(form)  # 按当前引擎初始化显隐
@@ -335,7 +349,7 @@ class SettingsDialog(QDialog):
 
     def _sync_tts_enabled(self) -> None:
         on = self.ck_tts.isChecked()
-        for w in (self.cb_engine, self.cb_voice_zh, self.cb_voice_en, self.cb_rate,
+        for w in (self.cb_engine, self.cb_voice_zh, self.cb_voice_en, self.cb_rate, self.cb_volume,
                   self.ed_tts_url, self.ed_tts_model, self.ed_tts_voice, self.ed_tts_key,
                   self.btn_tts_eye, self.ck_autoplay, self.cb_autoplay_what):
             w.setEnabled(on)
@@ -713,6 +727,7 @@ class SettingsDialog(QDialog):
         cfg["translate"]["mode"] = "study" if self.rb_study.isChecked() else "concise"
         cfg["translate"]["custom_prompt"] = self.ed_prompt.toPlainText().strip()
         cfg["translate"]["max_chars"] = self.sp_max_chars.value()
+        cfg["translate"]["timeout_s"] = self.sp_timeout.value()
 
         t = cfg["tts"]
         t["enabled"] = self.ck_tts.isChecked()
@@ -720,6 +735,7 @@ class SettingsDialog(QDialog):
         t["voice_zh"] = self.cb_voice_zh.currentText().strip()
         t["voice_en"] = self.cb_voice_en.currentText().strip()
         t["rate"] = self.cb_rate.currentText()
+        t["volume"] = self.cb_volume.currentText()
         t["auto_play"] = self.ck_autoplay.isChecked()
         t["auto_play_what"] = self.cb_autoplay_what.currentData()
         t["custom"] = {
