@@ -2,7 +2,6 @@
 
 import sys
 import types
-from unittest import mock
 
 import pytest
 
@@ -69,7 +68,8 @@ def test_apply_snapshot_partial_merge(db):
         "version": 1, "exported_at": "2026-09-09 00:00:00", "app_version": "test",
         "history": [
             {"source_text": "dup", "translated": "重复", "source_app": "", "created_at": "2026-09-01 10:00:00"},
-            {"source_text": "remote-only", "translated": "远端独有", "source_app": "", "created_at": "2026-09-02 10:00:00"},
+            {"source_text": "remote-only", "translated": "远端独有",
+             "source_app": "", "created_at": "2026-09-02 10:00:00"},
         ],
         "vocabulary": [],
     }

@@ -1,6 +1,31 @@
-"""全局主题：深/浅两套 QSS。克制用色：单一强调色，无渐变，阴影只用于浮层。"""
+"""全局主题：深/浅两套 QSS。克制用色：单一强调色，无渐变，阴影只用于浮层。
+
+颜色令牌（深浅两套）+ 动效/阴影/圆角令牌（主题共享，QSS 不支持 transition，
+动效时长与曲线由 Python 侧动画代码消费，统一从 MOTION 取值禁写裸数字）。
+"""
 
 from __future__ import annotations
+
+# ---- 动效令牌（深浅主题共享）----
+MOTION = {
+    "dur_in": 120,          # 窗口/控件出现（ms）
+    "dur_out": 90,          # 消失要快于出现，拖泥带水的退出最伤手感
+    "dur_grow": 180,        # 流式高度生长
+    "dur_micro": 150,       # flash 提示、状态切换等微反馈
+    "dur_fade_status": 200, # flash 状态淡出
+    "breathe_ms": 1200,     # loading 骨架呼吸周期
+    "ease_std": "OutCubic",     # 出现/生长标准曲线
+    "ease_breathe": "InOutSine",  # 呼吸（正弦感）
+    "slide_in": 8,          # 出现时的上浮位移 px
+    "shake_px": 4,          # 错误抖动幅度 px
+    "shake_ms": 160,        # 错误抖动时长
+}
+
+# ---- 浮层阴影令牌（只用于弹窗/遮罩这类浮层）----
+SHADOW = {"blur": 28, "alpha": 70, "dy": 4, "margin": 20}
+
+# ---- 圆角令牌（此前 6/10px 散落各处字面量）----
+RADIUS = {"sm": 6, "md": 10}
 
 DARK = {
     "name": "dark",
@@ -44,7 +69,7 @@ def build_qss(p: dict) -> str:
     QWidget {{
         background: {p['bg']};
         color: {p['text']};
-        font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+        font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
     }}
     QMainWindow, QDialog {{
         background: {p['bg']};
@@ -74,7 +99,11 @@ def build_qss(p: dict) -> str:
     QPushButton:hover {{ border-color: {p['accent']}; color: {p['accent']}; }}
     QPushButton:focus {{ border: 2px solid {p['accent']}; padding: 5px 15px; }}
     QPushButton:pressed {{ background: {p['panel2']}; }}
-    QPushButton:disabled {{ color: {p['text_dim']}; }}
+    QPushButton:disabled {{
+        color: {p['text_dim']};
+        background: transparent;
+        border-color: {p['border']};
+    }}
     QPushButton:checked {{ border-color: {p['accent']}; color: {p['accent']}; }}
     QPushButton#danger {{
         color: {p['error']};
@@ -178,6 +207,23 @@ def build_qss(p: dict) -> str:
     QLabel#dim {{ color: {p['text_dim']}; }}
     QLabel#sectionTitle {{ font-size: 17px; font-weight: 600; padding-bottom: 4px; }}
     QScrollArea {{ border: none; }}
+    QMenu {{
+        background: {p['panel']};
+        border: 1px solid {p['border']};
+        border-radius: 8px;
+        padding: 6px 0;
+    }}
+    QMenu::item {{
+        padding: 7px 26px 7px 18px;
+        border-radius: 4px;
+        margin: 0 6px;
+    }}
+    QMenu::item:selected {{ background: {p['panel2']}; color: {p['accent']}; }}
+    QMenu::item:disabled {{ color: {p['text_dim']}; }}
+    QMenu::separator {{ height: 1px; background: {p['border']}; margin: 6px 10px; }}
+    QMessageBox {{ background: {p['bg']}; }}
+    QMessageBox QLabel {{ background: transparent; }}
+    QMessageBox QPushButton {{ min-width: 72px; }}
     QToolTip {{
         background: {p['panel']};
         color: {p['text']};

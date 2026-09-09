@@ -36,6 +36,14 @@ SOURCE_PREVIEW_LIMIT = 120
 CURSOR_OFFSET = 24  # 弹窗离锚点（取词时鼠标位置）的偏移，右下与翻转侧同距
 RESULT_GROW_RATIO = 0.45  # 译文区高度上限 = 锚点屏可用高度的比例；小屏 120px 兜底
 GROW_THROTTLE_MS = 300  # 流式输出期间窗口跟随长高的最小间隔，防逐 chunk 抖动
+
+
+def _derived_fs(fs: int) -> tuple[int, int]:
+    """由用户正文字号推导辅助区字号：(小号, 术语号)。
+
+    状态行/术语标题用小号（fs-2, 下限 12），术语正文略大（fs-1, 下限 13）
+    ——术语是读外刊最需要看清的部分，不能比状态行还小。"""
+    return max(fs - 2, 12), max(fs - 1, 13)
 _TERM_SPLIT = re.compile(r"^【术语】\s*$", re.MULTILINE)
 _TERM_SEPS = [" — ", "—", " - ", " – ", "-"]
 
@@ -70,6 +78,8 @@ class TranslatePopup(QWidget):
         self._translated = ""
         self._task_id = -1
         self._pinned = False
+        self._p = palette("dark")   # 当前主题令牌，_apply_style 刷新；方法内统一用它不再各自查
+        self._fs = 14               # 当前正文字号，同上
         self._speaking_btn: QPushButton | None = None
         self._pending_speak_btn: QPushButton | None = None
         self._auto_close_timer = QTimer(self)
@@ -161,11 +171,14 @@ class TranslatePopup(QWidget):
 
     def _apply_style(self) -> None:
         cfg = self._cfg_getter().get("popup", {})
-        p = palette(cfg.get("theme", "dark"))
-        self.setWindowOpacity(float(cfg.get("opacity", 0.96)))
+        self._p = palette(cfg.get("theme", "dark"))
+        self._fs = int(cfg.get("font_size", 14))
+        self._target_opacity = float(cfg.get("opacity", 0.96))
+        p, fs = self._p, self._fs
+        fs_small, _ = _derived_fs(fs)
+        self.setWindowOpacity(self._target_opacity)
         self.setMinimumWidth(int(cfg.get("width", 480)))
         self.setMaximumWidth(int(cfg.get("width", 480)) + 160)
-        fs = int(cfg.get("font_size", 14))
         self.setStyleSheet(f"""
             TranslatePopup {{
                 background: {p['bg']};
@@ -176,7 +189,7 @@ class TranslatePopup(QWidget):
                 background: {p['source_bg']};
                 border-radius: 6px;
                 padding: 8px;
-                font-size: {max(fs - 2, 12)}px;
+                font-size: {fs_small}px;
                 color: {p['text_dim']};
             }}
             QLabel {{ background: transparent; border: none; }}
@@ -185,19 +198,15 @@ class TranslatePopup(QWidget):
                 font-size: {fs}px; color: {p['text']};
                 selection-background-color: {p['accent']};
             }}
+            /* 按钮只声明与全局 theme.py 的布局差异（弹窗空间敏感，padding 更紧凑、
+               字号随用户设置）；颜色/hover/checked/disabled/primary 规则统一走全局，
+               此前两处各写一套已经分叉过一次（padding 4/12 vs 6/16）。 */
             QPushButton {{
-                background: {p['panel']}; color: {p['text_dim']};
-                border: 1px solid {p['border']}; border-radius: 6px;
-                padding: 4px 12px; font-size: {max(fs - 2, 12)}px;
+                color: {p['text_dim']};
+                padding: 4px 12px;
+                font-size: {fs_small}px;
             }}
-            QPushButton:hover {{ color: {p['accent']}; border-color: {p['accent']}; }}
-            QPushButton:checked {{ color: {p['accent']}; border-color: {p['accent']}; }}
-            QPushButton#primary {{
-                background: {p['accent']}; color: {p['accent_text']};
-                border: none; font-weight: 600;
-            }}
-            QPushButton#primary:hover {{ background: {p['accent_hover']}; color: {p['accent_text']}; }}
-            QPushButton#primary:disabled {{ background: {p['panel2']}; color: {p['text_dim']}; }}
+            QPushButton#primary {{ font-weight: 600; }}
         """)
         # 主题/字号变化后按当前内容重排高度；空窗口回到基线（各展示路径会自行重设）
         if self.result_view.toPlainText().strip():
@@ -219,7 +228,7 @@ class TranslatePopup(QWidget):
     def show_translation(self, source: str, method: str = "", force: bool = False) -> None:
         """开始一次新的翻译展示。force=True 绕过缓存强制重译（重试入口）。"""
         cfg = self._cfg_getter()
-        p = palette(cfg.get("popup", {}).get("theme", "dark"))
+        p = self._p
         self._source = source
         self._translated = ""
         self._terms = []
@@ -256,7 +265,7 @@ class TranslatePopup(QWidget):
     def show_result(self, source: str, translated: str) -> None:
         """历史/生词本回看：直接展示已有译文，不发翻译请求（重试可重新发起）。"""
         cfg = self._cfg_getter()
-        p = palette(cfg.get("popup", {}).get("theme", "dark"))
+        p = self._p
         self._source = source
         self._translated = translated
         self._reset_for_show()
@@ -266,7 +275,7 @@ class TranslatePopup(QWidget):
         self.source_label.setVisible(True)
         self.result_view.setFixedHeight(60)  # 清掉上次残留的 fixed 高度，再由 _fit_height 按内容定
         self._terms = _parse_terms(translated or "")
-        self.result_view.setHtml(_format_result(translated or "（无译文）", p, self._terms))
+        self.result_view.setHtml(_format_result(translated or "（无译文）", p, self._terms, fs=self._fs))
         self._set_status("")
         for b in (self.btn_speak_source, self.btn_speak_trans, self.btn_star,
                   self.btn_copy, self.btn_retry):
@@ -281,7 +290,7 @@ class TranslatePopup(QWidget):
 
     def show_message(self, message: str, error: bool = True) -> None:
         """不发起翻译，仅弹出一条提示（如取词/翻译失败）。"""
-        p = palette(self._cfg_getter().get("popup", {}).get("theme", "dark"))
+        p = self._p
         self._reset_for_show()  # 含 _dragged 复位：错误提示也要弹回鼠标旁，而非上次拖放的旧位置
         self._source = ""
         self._translated = ""
@@ -367,8 +376,8 @@ class TranslatePopup(QWidget):
         self._grow_timer.stop()  # 完成态直接重排，作废可能还挂着的节流重排
         self._translated = text
         self._terms = _parse_terms(text)
-        p = palette(self._cfg_getter().get("popup", {}).get("theme", "dark"))
-        self.result_view.setHtml(_format_result(text, p, self._terms))
+        p = self._p
+        self.result_view.setHtml(_format_result(text, p, self._terms, fs=self._fs))
         # 译文到位，恢复 loading 期间禁用的按钮
         for b in (self.btn_speak_trans, self.btn_star, self.btn_copy):
             b.setEnabled(True)
@@ -460,16 +469,17 @@ class TranslatePopup(QWidget):
             self._loading_timer.stop()
             return
         self._loading_dots = (self._loading_dots + 1) % 4
-        p = palette(self._cfg_getter().get("popup", {}).get("theme", "dark"))
+        p = self._p
         self.result_view.setHtml(
             f"<div style='color:{p['text_dim']};'>翻译中{'.' * self._loading_dots}</div>")
 
     def _set_status(self, text: str, error: bool = False) -> None:
-        p = palette(self._cfg_getter().get("popup", {}).get("theme", "dark"))
+        p = self._p
+        fs_small, _ = _derived_fs(self._fs)
         color = p["error"] if error else (p["accent"] if text else p["text_dim"])
         self.status_label.setText(html.escape(text))
         self.status_label.setVisible(bool(text))  # 空文本不占行高
-        self.status_label.setStyleSheet(f"color: {color}; font-size: 12px;")
+        self.status_label.setStyleSheet(f"color: {color}; font-size: {fs_small}px;")
 
     def _flash_status(self, text: str) -> None:
         self._set_status(text)
@@ -550,9 +560,14 @@ def _clamp_into(ax: int, ay: int, w: int, h: int, avail) -> tuple[int, int]:
     return x, y
 
 
-def _format_result(text: str, p: dict, terms: list[tuple[str, str]] | None = None) -> str:
-    """译文完成后渲染：'【术语】' 段落做轻微强调，每行行首 ☆ 链接可单条收藏。"""
+def _format_result(text: str, p: dict, terms: list[tuple[str, str]] | None = None,
+                   fs: int = 14) -> str:
+    """译文完成后渲染：'【术语】' 段落做轻微强调，每行行首 ☆ 链接可单条收藏。
+
+    fs 为用户正文字号，术语标题/正文从它推导——此前写死 12/13px，
+    用户调大字号时术语区不跟随，同一屏两种尺度。"""
     accent, border, body_color = p["accent"], p["border"], p["text"]
+    fs_small, fs_term = _derived_fs(fs)
     parts = _TERM_SPLIT.split(text)
     body = html.escape(parts[0].strip())
     if len(parts) > 1:
@@ -567,9 +582,9 @@ def _format_result(text: str, p: dict, terms: list[tuple[str, str]] | None = Non
         terms_html = "<br/>".join(rows)
         body += (
             f"<div style='margin-top:10px;padding-top:8px;border-top:1px solid {border};'>"
-            f"<span style='color:{accent};font-weight:600;font-size:12px;'>术语</span>"
-            f"<span style='color:{accent};font-size:12px;'> · 点 ☆ 收藏</span>"
+            f"<span style='color:{accent};font-weight:600;font-size:{fs_small}px;'>术语</span>"
+            f"<span style='color:{accent};font-size:{fs_small}px;'> · 点 ☆ 收藏</span>"
             f"<div style='white-space:pre-wrap;font-family:inherit;margin:4px 0 0;"
-            f"color:{body_color};font-size:13px;line-height:1.7;'>{terms_html}</div></div>"
+            f"color:{body_color};font-size:{fs_term}px;line-height:1.7;'>{terms_html}</div></div>"
         )
     return f"<div style='line-height:1.55;'>{body}</div>"

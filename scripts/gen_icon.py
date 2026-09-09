@@ -61,7 +61,7 @@ def write_ico(pngs: list[tuple[int, bytes]], path: Path) -> None:
 def main() -> None:
     from PySide6.QtGui import QGuiApplication
 
-    app = QGuiApplication([])  # QPainter 字体渲染需要
+    QGuiApplication([])  # 实例必须存在 QPainter 字体才渲染（无需引用）
     OUT.mkdir(parents=True, exist_ok=True)
 
     png256 = render(256)

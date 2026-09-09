@@ -13,13 +13,17 @@ from PySide6.QtCore import QObject, QPoint, QRect, Qt, Signal
 from PySide6.QtGui import QColor, QCursor, QImage, QPainter, QPen
 from PySide6.QtWidgets import QApplication, QWidget
 
+from app.ui.theme import palette
+
 logger = logging.getLogger("ctrltrans.overlay")
 
 MIN_SELECT_PX = 10   # 选区最小边长（逻辑像素），小于此值视为误触取消
 MAX_SIDE_PX = 1600   # 送识别的图片长边上限（OCR 足够，控制上传体积）
 
-DIM_COLOR = QColor(0, 0, 0, 77)        # 30% 黑遮罩
-ACCENT_COLOR = QColor(80, 170, 255)    # 选区亮边框
+DIM_COLOR = QColor(0, 0, 0, 77)  # 30% 黑遮罩（功能性中性色，不随主题）
+# 选区边框固定用暗场强调色：遮罩是压暗场景，浅色主题的 teal(#0F766E) 在暗底上
+# 偏暗看不清，深浅主题统一用 dark palette 的亮 teal(#4DB6AC)——遮罩永远暗场配色
+ACCENT_COLOR = QColor(palette("dark")["accent"])
 
 
 def to_physical_rect(x: int, y: int, w: int, h: int, dpr: float,
