@@ -158,7 +158,7 @@ class _ScreenMask(QWidget):
         fm = p.fontMetrics()
         bw = fm.horizontalAdvance(text) + 12
         bh = fm.height() + 6
-        bx = s.right() - bw
+        bx = max(s.left(), s.right() - bw)  # 窄选区时徽标宽过选区，钳在选区左缘内
         by = s.bottom() + 6
         if by + bh > self.height():  # 选区贴屏底：徽标挪进选区内侧
             by = s.bottom() - bh - 6
@@ -230,6 +230,9 @@ class ScreenshotOverlay(QObject):
 
     def _close_all(self) -> None:
         for mask in self._masks:
+            fade = getattr(mask, "_fade_in", None)  # 淡入 80ms 内取消时先停动画，
+            if fade is not None:                    # 否则回调打在已删除的 C++ 对象上刷 RuntimeError
+                fade.stop()
             mask.close()
             mask.deleteLater()
         self._masks = []

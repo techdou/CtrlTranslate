@@ -20,7 +20,8 @@ def test_palette_keys_consistent():
 
 def test_motion_tokens_complete():
     needed = {"dur_in", "dur_out", "dur_grow", "dur_micro", "dur_fade_status",
-              "breathe_ms", "ease_std", "ease_breathe", "slide_in", "shake_px", "shake_ms"}
+              "breathe_ms", "ease_std", "slide_in", "shake_px", "shake_ms",
+              "dur_mask_in"}
     assert needed <= set(MOTION)
     # 消失要快于出现（拖泥带水的退出最伤手感）
     assert MOTION["dur_out"] < MOTION["dur_in"]
@@ -28,7 +29,13 @@ def test_motion_tokens_complete():
 
 def test_shadow_radius_tokens_complete():
     assert set(SHADOW) == {"blur", "alpha", "dy", "margin"}
-    assert set(RADIUS) == {"sm", "md"}
+    assert set(RADIUS) == {"xs", "sm", "md"}
+
+
+def test_radius_tokens_used_in_qss():
+    """圆角令牌必须真被 QSS 消费（此前定义了没人用，是带测试的死代码）。"""
+    qss = build_qss(DARK)
+    assert f"border-radius: {RADIUS['sm']}px" in qss
 
 
 def test_qss_contains_menu_and_disabled_rules():

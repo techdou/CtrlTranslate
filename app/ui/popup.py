@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
 
 from app.db import database
 from app.ui.motion import animate, breathe
-from app.ui.theme import MOTION, SHADOW, palette
+from app.ui.theme import MOTION, RADIUS, SHADOW, palette
 
 logger = logging.getLogger("ctrltrans.popup")
 
@@ -45,6 +45,7 @@ SOURCE_PREVIEW_LIMIT = 120
 # 弹窗离锚点的偏移 + SHADOW.margin 一起构成视觉间距（此前无阴影边距时是 24）
 CURSOR_OFFSET = 12
 RESULT_GROW_RATIO = 0.45  # 译文区高度上限 = 锚点屏可用高度的比例；小屏 120px 兜底
+WINDOW_MAX_AVAIL_RATIO = 0.6  # 整窗高度上限 = 锚点屏可用高度的比例
 GROW_THROTTLE_MS = 300  # 流式输出期间窗口跟随长高的最小间隔，防逐 chunk 抖动
 
 
@@ -256,11 +257,11 @@ class TranslatePopup(QWidget):
             #shell {{
                 background: {p['bg']};
                 border: 1px solid {p['border']};
-                border-radius: 10px;
+                border-radius: {RADIUS['md']}px;
             }}
             QLabel#sourcePreview {{
                 background: {p['source_bg']};
-                border-radius: 6px;
+                border-radius: {RADIUS['sm']}px;
                 padding: 8px;
                 font-size: {fs_small}px;
                 color: {p['text_dim']};
@@ -268,7 +269,7 @@ class TranslatePopup(QWidget):
             QLabel {{ background: transparent; border: none; }}
             QLabel#skBar {{
                 background: {p['border']};
-                border-radius: 4px;
+                border-radius: {RADIUS['xs']}px;
             }}
             QLabel#skHint {{ color: {p['text_dim']}; }}
             QTextBrowser {{
@@ -363,6 +364,9 @@ class TranslatePopup(QWidget):
             bar.setFixedWidth(max(120, int(inner * ratio)))
         self.result_view.setVisible(False)
         self._loading_widget.setVisible(True)
+        if self._breathe_anim is not None:  # 上一轮 loading 的呼吸先停（其闭包指向将被替换的 effect）
+            self._breathe_anim.stop()
+            self._breathe_anim = None
         self._loading_widget.setGraphicsEffect(QGraphicsOpacityEffect(self._loading_widget))
         self._loading_widget.graphicsEffect().setOpacity(0.55)
         self._breathe_anim = breathe(
@@ -408,8 +412,13 @@ class TranslatePopup(QWidget):
         self._task_id = -1
         self._dragged = False
         self._anchor = QCursor.pos()
+        for attr in ("_grow_anim", "_shake_anim"):  # 在途位移动画清场，防与新定位互抢
+            anim = getattr(self, attr)
+            if anim is not None:
+                anim.stop()
+                setattr(self, attr, None)
 
-    def show_translation(self, source: str, method: str = "", force: bool = False) -> None:
+    def show_translation(self, source: str, method: str = "", force: bool = False) -> int:
         """开始一次新的翻译展示。force=True 绕过缓存强制重译（重试入口）。"""
         cfg = self._cfg_getter()
         self._source = source
@@ -519,24 +528,27 @@ class TranslatePopup(QWidget):
         doc.setTextWidth(self.result_view.viewport().width())  # 同步触发重新排版
         text_h = int(doc.size().height()) + 8
         max_grow = max(int(self._avail_geometry().height() * RESULT_GROW_RATIO), 120)
-        # fixed 而非 minimum：sizeHint 不再被 QTextBrowser 默认值撑大，窗口才收得回去
-        self.result_view.setFixedHeight(min(max(text_h, 60), max_grow))
-        # chrome = 窗口高度 − 译文区高度（head/按钮/边距/阴影边距之和，布局常量）
+        # chrome = 窗口高度 − 译文区高度（head/按钮/边距/阴影边距之和，布局常量）。
+        # 必须在 setFixedHeight 之前用旧布局值算：setFixedHeight 后 height() 已同步
+        # 变化，再算就成 target = 当前高度（自相抵消，动画永不触发——曾踩过）。
         chrome = self.height() - self.result_view.height()
-        target = min(self.result_view.height() + chrome,
-                     int(self._avail_geometry().height() * 0.6))
-        self._animate_height_to(target)
+        content_h = min(max(text_h, 60), max_grow)
+        # fixed 而非 minimum：sizeHint 不再被 QTextBrowser 默认值撑大，窗口才收得回去
+        self.result_view.setFixedHeight(content_h)
+        target = min(content_h + chrome,
+                     int(self._avail_geometry().height() * WINDOW_MAX_AVAIL_RATIO))
+        self._animate_height_to(target, chrome)
 
-    def _animate_height_to(self, target_h: int) -> None:
+    def _animate_height_to(self, target_h: int, chrome: int) -> None:
         """窗口高度 → target_h 平滑过渡；拖拽态只长高不挪位。
 
-        每帧手动设 result_view 高度（不等布局激活，视觉逐帧正确）；
-        动画中途来了新目标直接从当前值重启（QVariantAnimation 新实例）。"""
+        chrome 由调用方在改 result_view 高度前算好传入（动画每帧用
+        h - chrome 反推译文区高度）；每帧手动设置不等布局激活，视觉逐帧
+        正确；动画中途来了新目标直接从当前值重启。"""
         if self._grow_anim is not None:
             self._grow_anim.stop()
             self._grow_anim = None
         w = self.width()
-        chrome = self.height() - self.result_view.height()
         avail = self._avail_geometry() if self._anchor else None
         ax = self._anchor.x() if self._anchor else 0
         ay = self._anchor.y() if self._anchor else 0
@@ -571,7 +583,8 @@ class TranslatePopup(QWidget):
             return
         if self._auto_close_timer.isActive():
             self._restart_auto_close_on_activity()
-        if self._placeholder_active:
+        replaced = self._placeholder_active  # 占位被本块替换时，块尾不再追加（否则首块显示两遍）
+        if replaced:
             self._loading_timer.stop()
             self._hide_skeleton()
             self.result_view.setPlainText(piece)  # 替换 loading 占位
@@ -579,7 +592,7 @@ class TranslatePopup(QWidget):
             self._placeholder_active = False
         sb = self.result_view.verticalScrollBar()
         at_bottom = sb.value() >= sb.maximum() - 8
-        if not self._placeholder_active:
+        if not replaced:
             self.result_view.insertPlainText(piece)
         if at_bottom:
             sb.setValue(sb.maximum())

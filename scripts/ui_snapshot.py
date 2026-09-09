@@ -146,9 +146,7 @@ def main() -> None:
     from app.ui.theme import build_qss, palette
 
     qapp = QApplication([])
-    # 弹窗按钮的 hover/primary 规则已收敛到全局 QSS（与 main.py 同构），
-    # 不挂全局样式表的话弹窗截图会缺按钮态样式
-    qapp.setStyleSheet(build_qss(palette("dark")))
+    # 全局 QSS 必须挂（弹窗按钮规则已收敛到全局）；循环里按主题重挂
     OUT.mkdir(parents=True, exist_ok=True)
     for theme in ("dark", "light"):
         qapp.setStyleSheet(build_qss(palette(theme)))

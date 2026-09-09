@@ -16,7 +16,6 @@ MOTION = {
     "dur_mask_in": 80,      # 截图遮罩淡入上限——慢了耽误截图手感
     "breathe_ms": 1200,     # loading 骨架呼吸周期
     "ease_std": "OutCubic",     # 出现/生长标准曲线
-    "ease_breathe": "InOutSine",  # 呼吸（正弦感）
     "slide_in": 8,          # 出现时的上浮位移 px
     "shake_px": 4,          # 错误抖动幅度 px
     "shake_ms": 160,        # 错误抖动时长
@@ -25,8 +24,8 @@ MOTION = {
 # ---- 浮层阴影令牌（只用于弹窗/遮罩这类浮层）----
 SHADOW = {"blur": 28, "alpha": 70, "dy": 4, "margin": 20}
 
-# ---- 圆角令牌（此前 6/10px 散落各处字面量）----
-RADIUS = {"sm": 6, "md": 10}
+# ---- 圆角令牌（此前 6/10px 散落各处字面量）：xs=骨架条等微元素，sm=常规控件，md=浮层窗口 ----
+RADIUS = {"xs": 4, "sm": 6, "md": 10}
 
 DARK = {
     "name": "dark",
@@ -78,7 +77,7 @@ def build_qss(p: dict) -> str:
     QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox, QComboBox {{
         background: {p['panel']};
         border: 1px solid {p['border']};
-        border-radius: 6px;
+        border-radius: {RADIUS['sm']}px;
         padding: 5px 8px;
         selection-background-color: {p['accent']};
     }}
@@ -94,7 +93,7 @@ def build_qss(p: dict) -> str:
     QPushButton {{
         background: {p['panel']};
         border: 1px solid {p['border']};
-        border-radius: 6px;
+        border-radius: {RADIUS['sm']}px;
         padding: 6px 16px;
     }}
     QPushButton:hover {{ border-color: {p['accent']}; color: {p['accent']}; }}
@@ -172,12 +171,12 @@ def build_qss(p: dict) -> str:
     QScrollBar::handle:horizontal:hover {{ background: {p['text_dim']}; }}
     QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
     QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
-    QTabWidget::pane {{ border: 1px solid {p['border']}; border-radius: 6px; top: -1px; }}
+    QTabWidget::pane {{ border: 1px solid {p['border']}; border-radius: {RADIUS['sm']}px; top: -1px; }}
     QTabBar::tab {{
         padding: 7px 18px;
         border: 1px solid {p['border']};
         border-bottom: none;
-        border-top-left-radius: 6px; border-top-right-radius: 6px;
+        border-top-left-radius: {RADIUS['sm']}px; border-top-right-radius: {RADIUS['sm']}px;
         background: {p['panel2']};
         margin-right: 3px;
     }}
