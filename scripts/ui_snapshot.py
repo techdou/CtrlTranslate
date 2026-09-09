@@ -71,7 +71,7 @@ def _save(widget, path: Path) -> None:
 
 def snap_popup(qapp, theme: str, name: str) -> None:
     pop = make_popup(qapp, theme)
-    pop._translator.translate = lambda text: (setattr(pop, "_task_id", 99) or 99)  # mock：不发真实请求
+    pop._translator.translate = lambda text, use_cache=True: (setattr(pop, "_task_id", 99) or 99)  # mock：不发真实请求
 
     if name.endswith("loading"):
         pop.show_translation(DEMO_SOURCE, "clipboard")  # 走真实产品路径（含 120 字符截断）

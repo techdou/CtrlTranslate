@@ -296,7 +296,7 @@ class CtrlApp:
         else:
             self.hotkey.stop()
             self.tts.stop()
-            self.popup.hide()
+            self.popup.close_animated()
         self.tray.set_enabled(enabled)
 
     def on_autostart_changed(self, on: bool) -> None:

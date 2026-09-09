@@ -1,4 +1,4 @@
-"""翻译弹窗：无边框置顶，锚定取词时的鼠标位置（流式重排不追实时鼠标），流式打字机渲染，失焦自动关闭。
+"""翻译弹窗：无边框置顶，锚定取词时的鼠标位置（流式重排不追实时鼠标），流式整块渲染，失焦自动关闭。
 
 交互契约：
 - show_translation(source) 后由 Translator 信号驱动 on_chunk/on_done/on_error
@@ -6,18 +6,26 @@
 - 按钮：读原文 / 读译文 / 收藏 / 复制 / 重试（关闭由 Esc 与失焦覆盖，不设按钮）
 - 朗读中的按钮变为「停止」，再点即停
 - 错误态：错误文案进正文区（可选中复制），无关按钮隐藏
+动效契约（时长/曲线全部取 theme.MOTION 令牌，禁写裸数字）：
+- 出现 = show_animated()：淡入 + 上浮 8px；消失 = close_animated()：淡出后 hide
+- 流式长高 = _fit_height() → _animate_height_to()：围绕锚点平滑生长（翻转侧向上长）
+- on_done 两段式：纯译文先平滑长高，术语块延迟追加再小幅长高
+- loading = 骨架条呼吸（motion.breathe 正弦）；错误 = 窗口微 shake 一次
 """
 
 from __future__ import annotations
 
 import html
 import logging
+import math
 import re
 
 from PySide6.QtCore import QEvent, Qt, QTimer
-from PySide6.QtGui import QCursor, QGuiApplication, QTextCursor
+from PySide6.QtGui import QColor, QCursor, QGuiApplication, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
+    QGraphicsDropShadowEffect,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -28,12 +36,14 @@ from PySide6.QtWidgets import (
 )
 
 from app.db import database
-from app.ui.theme import palette
+from app.ui.motion import animate, breathe
+from app.ui.theme import MOTION, SHADOW, palette
 
 logger = logging.getLogger("ctrltrans.popup")
 
 SOURCE_PREVIEW_LIMIT = 120
-CURSOR_OFFSET = 24  # 弹窗离锚点（取词时鼠标位置）的偏移，右下与翻转侧同距
+# 弹窗离锚点的偏移 + SHADOW.margin 一起构成视觉间距（此前无阴影边距时是 24）
+CURSOR_OFFSET = 12
 RESULT_GROW_RATIO = 0.45  # 译文区高度上限 = 锚点屏可用高度的比例；小屏 120px 兜底
 GROW_THROTTLE_MS = 300  # 流式输出期间窗口跟随长高的最小间隔，防逐 chunk 抖动
 
@@ -84,7 +94,7 @@ class TranslatePopup(QWidget):
         self._pending_speak_btn: QPushButton | None = None
         self._auto_close_timer = QTimer(self)
         self._auto_close_timer.setSingleShot(True)
-        self._auto_close_timer.timeout.connect(self.hide)
+        self._auto_close_timer.timeout.connect(self.close_animated)
         self._status_timer = QTimer(self)
         self._status_timer.setSingleShot(True)
         self._status_timer.timeout.connect(lambda: self._set_status(""))
@@ -100,9 +110,23 @@ class TranslatePopup(QWidget):
         self._grow_timer.setInterval(GROW_THROTTLE_MS)
         self._grow_timer.timeout.connect(self._fit_height)
         self._terms: list[tuple[str, str]] = []  # 当前译文的术语表，☆ 链接收藏用
+        self._placeholder_active = False  # loading 占位生效中，首块 chunk 需替换而非追加
+        # 动效句柄：动画对象必须被持有（无引用会被 GC 中途停止）
+        self._show_anim = None    # 出现：淡入+上浮
+        self._close_anim = None   # 消失：淡出
+        self._grow_anim = None    # 高度平滑生长
+        self._breathe_anim = None  # loading 骨架呼吸
+        self._shake_anim = None   # 错误抖动
+        self._status_fade = None  # flash 状态淡入/淡出
+        # on_done 两段式：纯译文先长高，术语块 dur_grow 后追加
+        self._terms_timer = QTimer(self)
+        self._terms_timer.setSingleShot(True)
+        self._terms_timer.timeout.connect(self._append_terms)
 
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_DeleteOnClose, False)
+        # 透明窗口本体：QSS 圆角真正裁剪窗口形状，四周留 SHADOW.margin 给阴影绘制
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
 
         self._build_ui()
         self._apply_style()
@@ -113,9 +137,23 @@ class TranslatePopup(QWidget):
     # ---------------------------------------------------------------- UI
 
     def _build_ui(self) -> None:
+        # 窗口本体透明，内容全部放进 shell（圆角 + 边框 + 阴影都在 shell 上）
         root = QVBoxLayout(self)
-        root.setContentsMargins(14, 12, 14, 12)
-        root.setSpacing(8)
+        root.setContentsMargins(SHADOW["margin"], SHADOW["margin"],
+                                SHADOW["margin"], SHADOW["margin"])
+        root.setSpacing(0)
+        self._shell = QWidget(self)
+        self._shell.setObjectName("shell")
+        shadow = QGraphicsDropShadowEffect(self._shell)
+        shadow.setBlurRadius(SHADOW["blur"])
+        shadow.setOffset(0, SHADOW["dy"])
+        shadow.setColor(QColor(0, 0, 0, SHADOW["alpha"]))
+        self._shell.setGraphicsEffect(shadow)
+        root.addWidget(self._shell)
+
+        box = QVBoxLayout(self._shell)
+        box.setContentsMargins(14, 12, 14, 12)
+        box.setSpacing(8)
 
         head = QHBoxLayout()
         head.setSpacing(8)
@@ -132,7 +170,7 @@ class TranslatePopup(QWidget):
         self.btn_pin.setMinimumWidth(64)  # 容纳「已钉住」三字；Fixed 策略防隐藏原文后吃满整行
         self.btn_pin.toggled.connect(self._on_pin_toggled)
         head.addWidget(self.btn_pin, 0, Qt.AlignTop | Qt.AlignRight)
-        root.addLayout(head)
+        box.addLayout(head)
 
         self.result_view = QTextBrowser()
         self.result_view.setOpenExternalLinks(False)
@@ -141,11 +179,32 @@ class TranslatePopup(QWidget):
         self.result_view.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.result_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.result_view.setFrameShape(QTextBrowser.NoFrame)
-        root.addWidget(self.result_view, 1)
+        box.addWidget(self.result_view, 1)
+
+        # loading 骨架：与 result_view 同位互斥显示（首 token 前的"正在成形"感）
+        self._loading_widget = QWidget()
+        self._loading_widget.setVisible(False)
+        sk = QVBoxLayout(self._loading_widget)
+        sk.setContentsMargins(4, 10, 4, 2)
+        sk.setSpacing(10)
+        self._skeleton_rows: list[tuple[QLabel, float]] = []
+        for ratio in (0.92, 0.78, 0.55):  # 宽度递减，模拟译文段落的形态
+            bar = QLabel()
+            bar.setObjectName("skBar")
+            bar.setFixedHeight(12)
+            sk.addWidget(bar)
+            self._skeleton_rows.append((bar, ratio))
+        self._loading_hint = QLabel("翻译中")
+        self._loading_hint.setObjectName("skHint")
+        sk.addWidget(self._loading_hint)
+        box.addWidget(self._loading_widget, 1)
 
         self.status_label = QLabel()
         self.status_label.setVisible(False)  # 空状态不占行高，窗口高度贴合内容
-        root.addWidget(self.status_label)
+        self._status_effect = QGraphicsOpacityEffect(self.status_label)
+        self._status_effect.setOpacity(1.0)
+        self.status_label.setGraphicsEffect(self._status_effect)
+        box.addWidget(self.status_label)
 
         btns = QHBoxLayout()
         btns.setSpacing(6)
@@ -159,7 +218,7 @@ class TranslatePopup(QWidget):
                   self.btn_copy, self.btn_retry):
             btns.addWidget(b)
         btns.addStretch(1)
-        root.addLayout(btns)
+        box.addLayout(btns)
 
         self.btn_speak_source.clicked.connect(
             lambda: self._toggle_speak("en", self.btn_speak_source))
@@ -180,7 +239,8 @@ class TranslatePopup(QWidget):
         self.setMinimumWidth(int(cfg.get("width", 480)))
         self.setMaximumWidth(int(cfg.get("width", 480)) + 160)
         self.setStyleSheet(f"""
-            TranslatePopup {{
+            TranslatePopup {{ background: transparent; }}
+            #shell {{
                 background: {p['bg']};
                 border: 1px solid {p['border']};
                 border-radius: 10px;
@@ -193,6 +253,11 @@ class TranslatePopup(QWidget):
                 color: {p['text_dim']};
             }}
             QLabel {{ background: transparent; border: none; }}
+            QLabel#skBar {{
+                background: {p['border']};
+                border-radius: 4px;
+            }}
+            QLabel#skHint {{ color: {p['text_dim']}; }}
             QTextBrowser {{
                 background: transparent; border: none;
                 font-size: {fs}px; color: {p['text']};
@@ -216,6 +281,89 @@ class TranslatePopup(QWidget):
 
     # ---------------------------------------------------------------- 生命周期
 
+    def show_animated(self) -> None:
+        """三条展示路径的统一入口：淡入 + 从下方 8px 上浮。
+
+        用 setWindowOpacity 而非 QGraphicsOpacityEffect——后者对带
+        StaysOnTop 的顶层窗口在 Windows 上有渲染回退风险。"""
+        if self._close_anim is not None:
+            self._close_anim.stop()
+            self._close_anim = None
+        if self._show_anim is not None:
+            self._show_anim.stop()
+        base_x, base_y = self.x(), self.y()
+        slide = MOTION["slide_in"]
+        target = self._target_opacity
+
+        def _apply(v: float) -> None:
+            self.setWindowOpacity(v * target)
+            self.move(base_x, base_y + round(slide * (1 - v)))
+
+        self.setWindowOpacity(0.0)
+        self.move(base_x, base_y + slide)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self._show_anim = animate(
+            _apply, 0.0, 1.0, MOTION["dur_in"], MOTION["ease_std"],
+            done=lambda: self.setWindowOpacity(target))
+
+    def close_animated(self) -> None:
+        """全部关闭路径的统一出口：淡出后才 hide()。
+
+        动画期间被再次 show_animated 会 stop 本动画；连续触发则从当前
+        透明度续淡。stop() 不触发 finished，done=hide 不会误执行。"""
+        if not self.isVisible():
+            return
+        if self._show_anim is not None:
+            self._show_anim.stop()
+            self._show_anim = None
+        if self._close_anim is not None:
+            self._close_anim.stop()
+        start = self.windowOpacity()
+        if start <= 0.01:  # 已近乎不可见（如被中断在半途），直接收
+            self.hide()
+            return
+        self._close_anim = animate(
+            self.setWindowOpacity, start, 0.0, MOTION["dur_out"], "OutQuad",
+            done=self.hide)
+
+    def _shake(self) -> None:
+        """错误反馈：窗口水平微抖一次（衰减正弦），只用于错误态。"""
+        if not self.isVisible():
+            return
+        if self._shake_anim is not None:
+            self._shake_anim.stop()
+        base_x, base_y = self.x(), self.y()
+        px = MOTION["shake_px"]
+
+        def _apply(v: float) -> None:
+            # sin(v·3π)·(1-v)：先右后左各一次，幅度衰减到 0
+            self.move(base_x + round(px * math.sin(v * 3 * math.pi) * (1 - v)), base_y)
+
+        self._shake_anim = animate(_apply, 0.0, 1.0, MOTION["shake_ms"], "Linear")
+
+    def _show_skeleton(self) -> None:
+        """loading 骨架：宽度递减的圆角灰条 + 呼吸（正弦透明度循环）。"""
+        inner = self.width() - 2 * (SHADOW["margin"] + 14) - 8
+        for bar, ratio in self._skeleton_rows:
+            bar.setFixedWidth(max(120, int(inner * ratio)))
+        self.result_view.setVisible(False)
+        self._loading_widget.setVisible(True)
+        self._loading_widget.setGraphicsEffect(QGraphicsOpacityEffect(self._loading_widget))
+        self._loading_widget.graphicsEffect().setOpacity(0.55)
+        self._breathe_anim = breathe(
+            self._loading_widget.graphicsEffect().setOpacity,
+            MOTION["breathe_ms"], 0.55, 0.95)
+
+    def _hide_skeleton(self) -> None:
+        if self._breathe_anim is not None:
+            self._breathe_anim.stop()
+            self._breathe_anim = None
+        self._loading_widget.setVisible(False)
+        self._loading_widget.setGraphicsEffect(None)
+        self.result_view.setVisible(True)
+
     def _reset_for_show(self) -> None:
         """三种展示入口的公共复位：作废回调、解除拖拽冻结、记录本次锚点。
 
@@ -228,21 +376,21 @@ class TranslatePopup(QWidget):
     def show_translation(self, source: str, method: str = "", force: bool = False) -> None:
         """开始一次新的翻译展示。force=True 绕过缓存强制重译（重试入口）。"""
         cfg = self._cfg_getter()
-        p = self._p
         self._source = source
         self._translated = ""
         self._terms = []
+        self._terms_timer.stop()
         self._reset_for_show()
         self._placeholder_active = True  # loading 占位在正文区，首块 chunk 需替换而非追加
         preview = source[:SOURCE_PREVIEW_LIMIT] + ("…" if len(source) > SOURCE_PREVIEW_LIMIT else "")
         via = " · 取词：UIA" if method == "uia" else ""
         self.source_label.setText(f"原文{via}\n{html.escape(preview)}")
         self.source_label.setVisible(True)
-        # 上一次译文残留的 fixed 高度先复位，loading 态窗口收敛到一行占位
+        # 上一次译文残留的 fixed 高度先复位，loading 态窗口收敛到骨架高度
         self.result_view.setFixedHeight(60)
-        # loading 占位放正文区（视线落点），首个 chunk 整体替换
-        self.result_view.setHtml(f"<div style='color:{p['text_dim']};'>翻译中…</div>")
+        # loading 骨架占正文位（视线落点），首个 chunk 整体替换
         self._loading_dots = 0
+        self._loading_hint.setText("翻译中")
         self._loading_timer.start()
         self._set_status("")
         for b in (self.btn_speak_source, self.btn_speak_trans, self.btn_star,
@@ -253,10 +401,9 @@ class TranslatePopup(QWidget):
             b.setEnabled(False)
 
         self._place_near_anchor()
-        self.show()
-        self.raise_()
+        self._show_skeleton()  # 定位后再算骨架条宽（width 已定准）
+        self.show_animated()
         logger.info("popup shown: winId=%s visible=%s", self.winId(), self.isVisible())
-        self.activateWindow()
         self._start_auto_close(cfg)
 
         self._task_id = self._translator.translate(source, use_cache=not force)
@@ -265,17 +412,18 @@ class TranslatePopup(QWidget):
     def show_result(self, source: str, translated: str) -> None:
         """历史/生词本回看：直接展示已有译文，不发翻译请求（重试可重新发起）。"""
         cfg = self._cfg_getter()
-        p = self._p
         self._source = source
         self._translated = translated
+        self._terms_timer.stop()
         self._reset_for_show()
         self._placeholder_active = False
         preview = source[:SOURCE_PREVIEW_LIMIT] + ("…" if len(source) > SOURCE_PREVIEW_LIMIT else "")
         self.source_label.setText(f"原文\n{html.escape(preview)}")
         self.source_label.setVisible(True)
+        self._hide_skeleton()
         self.result_view.setFixedHeight(60)  # 清掉上次残留的 fixed 高度，再由 _fit_height 按内容定
         self._terms = _parse_terms(translated or "")
-        self.result_view.setHtml(_format_result(translated or "（无译文）", p, self._terms, fs=self._fs))
+        self.result_view.setHtml(_format_result(translated or "（无译文）", self._p, self._terms, fs=self._fs))
         self._set_status("")
         for b in (self.btn_speak_source, self.btn_speak_trans, self.btn_star,
                   self.btn_copy, self.btn_retry):
@@ -283,22 +431,22 @@ class TranslatePopup(QWidget):
             b.setEnabled(True)
 
         self._fit_height()
-        self.show()
-        self.raise_()
-        self.activateWindow()
+        self.show_animated()
         self._start_auto_close(cfg)
 
     def show_message(self, message: str, error: bool = True) -> None:
-        """不发起翻译，仅弹出一条提示（如取词/翻译失败）。"""
+        """不发起翻译，仅弹出一条提示（如取词/翻译失败）。错误态带一次微抖。"""
         p = self._p
         self._reset_for_show()  # 含 _dragged 复位：错误提示也要弹回鼠标旁，而非上次拖放的旧位置
         self._source = ""
         self._translated = ""
         self._terms = []
+        self._terms_timer.stop()
         self._placeholder_active = False
         self.source_label.setText("")
         self.source_label.setVisible(False)  # 空文本时 padding+底色仍会渲染，整块隐藏
         self._loading_timer.stop()
+        self._hide_skeleton()
         self.result_view.setFixedHeight(60)  # 同 show_translation：清掉上次残留的 fixed 高度
         # 错误是此刻唯一重要的信息：进正文区、可选中复制；无关按钮隐藏
         self.result_view.setHtml(f"<div style='color:{p['error']};'>{html.escape(message)}</div>")
@@ -308,10 +456,10 @@ class TranslatePopup(QWidget):
         self.btn_retry.setVisible(True)
 
         self._fit_height()
-        self.show()
+        self.show_animated()
         logger.info("popup showing message: %s", message[:60])
-        self.raise_()
-        self.activateWindow()
+        if error:  # 抖动等出现动画播完再开始，避免两个位移动画打架
+            QTimer.singleShot(MOTION["dur_in"], self._shake)
 
     def _avail_geometry(self):
         """锚点所在屏的可用区域（已扣任务栏）；锚点屏失效时回退主屏。"""
@@ -328,17 +476,51 @@ class TranslatePopup(QWidget):
         self.move(x, y)
 
     def _fit_height(self) -> None:
-        """译文区高度贴合内容（带上限），窗口随内容伸缩，长译文内部滚动。"""
+        """译文区高度贴合内容（带上限），窗口平滑长高，长译文内部滚动。
+
+        每帧重算 placement：正常侧往下长高（y 不动），翻转到锚点上方时
+        顶边随高度增长上移——"围绕锚点长高"而不是只改右下角。"""
         doc = self.result_view.document()
         doc.setTextWidth(self.result_view.viewport().width())  # 同步触发重新排版
         text_h = int(doc.size().height()) + 8
         max_grow = max(int(self._avail_geometry().height() * RESULT_GROW_RATIO), 120)
         # fixed 而非 minimum：sizeHint 不再被 QTextBrowser 默认值撑大，窗口才收得回去
         self.result_view.setFixedHeight(min(max(text_h, 60), max_grow))
-        if self._dragged:
-            self.adjustSize()  # 只按新尺寸重算窗口，左上角留在用户拖放的位置
-        else:
-            self._place_near_anchor()
+        # chrome = 窗口高度 − 译文区高度（head/按钮/边距/阴影边距之和，布局常量）
+        chrome = self.height() - self.result_view.height()
+        target = min(self.result_view.height() + chrome,
+                     int(self._avail_geometry().height() * 0.6))
+        self._animate_height_to(target)
+
+    def _animate_height_to(self, target_h: int) -> None:
+        """窗口高度 → target_h 平滑过渡；拖拽态只长高不挪位。
+
+        每帧手动设 result_view 高度（不等布局激活，视觉逐帧正确）；
+        动画中途来了新目标直接从当前值重启（QVariantAnimation 新实例）。"""
+        if self._grow_anim is not None:
+            self._grow_anim.stop()
+            self._grow_anim = None
+        w = self.width()
+        chrome = self.height() - self.result_view.height()
+        avail = self._avail_geometry() if self._anchor else None
+        ax = self._anchor.x() if self._anchor else 0
+        ay = self._anchor.y() if self._anchor else 0
+        dragged = self._dragged
+
+        def _apply(v: float) -> None:
+            h = int(round(v))
+            self.resize(w, h)
+            self.result_view.setFixedHeight(max(h - chrome, 20))
+            if not dragged and avail is not None:
+                x, y = _compute_placement(ax, ay, w, h, avail)
+                self.move(x, y)
+
+        start = float(self.height())
+        if not self.isVisible() or abs(target_h - start) <= 2:
+            _apply(float(target_h))  # 首帧/微调不动画，直接就位
+            return
+        self._grow_anim = animate(
+            _apply, start, float(target_h), MOTION["dur_grow"], MOTION["ease_std"])
 
     def _start_auto_close(self, cfg: dict) -> None:
         secs = int(cfg.get("popup", {}).get("auto_close_s", 0))
@@ -354,14 +536,15 @@ class TranslatePopup(QWidget):
             return
         if self._auto_close_timer.isActive():
             self._restart_auto_close_on_activity()
-        sb = self.result_view.verticalScrollBar()
-        at_bottom = sb.value() >= sb.maximum() - 8
         if self._placeholder_active:
             self._loading_timer.stop()
+            self._hide_skeleton()
             self.result_view.setPlainText(piece)  # 替换 loading 占位
             self.result_view.moveCursor(QTextCursor.MoveOperation.End)  # setPlainText 会把光标重置到开头
             self._placeholder_active = False
-        else:
+        sb = self.result_view.verticalScrollBar()
+        at_bottom = sb.value() >= sb.maximum() - 8
+        if not self._placeholder_active:
             self.result_view.insertPlainText(piece)
         if at_bottom:
             sb.setValue(sb.maximum())
@@ -374,15 +557,27 @@ class TranslatePopup(QWidget):
             return
         self._loading_timer.stop()
         self._grow_timer.stop()  # 完成态直接重排，作废可能还挂着的节流重排
+        self._hide_skeleton()    # 缓存命中时无 on_chunk，占位可能还挂着
         self._translated = text
         self._terms = _parse_terms(text)
-        p = self._p
-        self.result_view.setHtml(_format_result(text, p, self._terms, fs=self._fs))
-        # 译文到位，恢复 loading 期间禁用的按钮
+        # 两段式：先渲染纯译文平滑长高；有术语时延迟 dur_grow 再追加——
+        # 一次"纯文本→富文本+术语块"的视觉大跳拆成两次柔和的小动作
+        body = html.escape(_TERM_SPLIT.split(text)[0].strip())
+        self.result_view.setHtml(body)
         for b in (self.btn_speak_trans, self.btn_star, self.btn_copy):
             b.setEnabled(True)
         self._fit_height()
         self._set_status("")
+        if self._terms:
+            self._terms_timer.start(MOTION["dur_grow"])
+
+    def _append_terms(self) -> None:
+        """on_done 第二段：追加术语块（带 ☆ 收藏链接）再小幅长高。"""
+        if not self._terms or not self.isVisible():
+            return
+        self.result_view.setHtml(
+            _format_result(self._translated, self._p, self._terms, fs=self._fs))
+        self._fit_height()
 
     def on_error(self, message: str, task_id: int) -> None:
         if task_id != self._task_id:
@@ -464,22 +659,37 @@ class TranslatePopup(QWidget):
     # ---------------------------------------------------------------- 杂项
 
     def _tick_loading(self) -> None:
-        """loading 占位的三点跳动动画；首个 chunk 到达（占位被替换）后自停。"""
+        """骨架下方提示文字的三点跳动；首个 chunk 到达（占位被替换）后自停。"""
         if not self._placeholder_active:
             self._loading_timer.stop()
             return
         self._loading_dots = (self._loading_dots + 1) % 4
-        p = self._p
-        self.result_view.setHtml(
-            f"<div style='color:{p['text_dim']};'>翻译中{'.' * self._loading_dots}</div>")
+        self._loading_hint.setText(f"翻译中{'.' * self._loading_dots}")
 
     def _set_status(self, text: str, error: bool = False) -> None:
         p = self._p
         fs_small, _ = _derived_fs(self._fs)
         color = p["error"] if error else (p["accent"] if text else p["text_dim"])
+        was_visible = self.status_label.isVisible()
         self.status_label.setText(html.escape(text))
-        self.status_label.setVisible(bool(text))  # 空文本不占行高
-        self.status_label.setStyleSheet(f"color: {color}; font-size: {fs_small}px;")
+        if self._status_fade is not None:
+            self._status_fade.stop()
+            self._status_fade = None
+        if text:
+            self.status_label.setStyleSheet(f"color: {color}; font-size: {fs_small}px;")
+            self.status_label.setVisible(True)  # 空文本不占行高；有文本立刻占位再淡入
+            if not was_visible:  # 从无到有：淡入（已可见的内容刷新不重放动画）
+                self._status_effect.setOpacity(0.0)
+                self._status_fade = animate(
+                    self._status_effect.setOpacity, 0.0, 1.0,
+                    MOTION["dur_micro"], MOTION["ease_std"])
+            else:
+                self._status_effect.setOpacity(1.0)  # 可能停在淡出半途，拉回全显
+        elif was_visible:  # 从有到无：淡出后再释放行高
+            self._status_fade = animate(
+                self._status_effect.setOpacity, self._status_effect.opacity(), 0.0,
+                MOTION["dur_fade_status"], "OutQuad",
+                done=self.status_label.hide)
 
     def _flash_status(self, text: str) -> None:
         self._set_status(text)
@@ -493,7 +703,7 @@ class TranslatePopup(QWidget):
 
     def keyPressEvent(self, event) -> None:
         if event.key() in (Qt.Key_Escape, Qt.Key_Q):
-            self.hide()
+            self.close_animated()
         super().keyPressEvent(event)
 
     # 无边框窗口的拖拽移动：按住窗口空白处（非文本/按钮区域）拖动。
@@ -531,7 +741,7 @@ class TranslatePopup(QWidget):
             and self.isVisible()
             and not self._pinned
         ):
-            self.hide()
+            self.close_animated()
         return super().eventFilter(obj, event)
 
     def hideEvent(self, event) -> None:
@@ -539,7 +749,15 @@ class TranslatePopup(QWidget):
         self._status_timer.stop()
         self._loading_timer.stop()
         self._grow_timer.stop()
+        self._terms_timer.stop()
         self._tts.stop()
+        # 在途动画全部终止（stop 不触发 finished，无误回调），句柄清空
+        for attr in ("_show_anim", "_close_anim", "_grow_anim",
+                     "_breathe_anim", "_shake_anim", "_status_fade"):
+            anim = getattr(self, attr)
+            if anim is not None:
+                anim.stop()
+                setattr(self, attr, None)
         super().hideEvent(event)
 
 
