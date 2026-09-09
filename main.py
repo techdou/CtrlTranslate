@@ -8,16 +8,17 @@ from __future__ import annotations
 import base64
 import sys
 
-from PySide6.QtCore import QLockFile, QTimer, QUrl
+from PySide6.QtCore import QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from app import __version__
-from app.config import DATA_DIR, load_config, save_config
+from app.config import load_config, save_config
 from app.core.autostart import is_enabled as autostart_enabled
 from app.core.autostart import set_enabled as set_autostart
 from app.core.backup import BackupService
 from app.core.capture import TextCaptureService, get_foreground_app
+from app.core.singleton import SingleInstance
 from app.core.hotkey import HotkeyService, SimpleHotkey
 from app.core.translator import Translator
 from app.core.tts import TTSService
@@ -318,16 +319,16 @@ def main() -> int:
     app.setWindowIcon(load_icon())  # 任务栏/标题栏统一应用图标（托盘另有实例）
     app.setQuitOnLastWindowClosed(False)
 
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    lock = QLockFile(str(DATA_DIR / "ctrltrans.lock"))
-    if not lock.tryLock(50):
-        QMessageBox.information(
-            None, "CtrlTranslate", "已在运行中，请查看系统托盘（可能已折叠）。"
-        )
+    # 单实例：第二实例唤醒主实例弹设置窗后静默退出（双击 exe = "打开程序"意图被满足）
+    single = SingleInstance()
+    if not single.acquire():
+        single.notify_primary()
         return 0
+    app.aboutToQuit.connect(single.release)
 
     ctrl = CtrlApp(app)
     ctrl.start()
+    single.activated.connect(ctrl.open_settings)
     return app.exec()
 
 
