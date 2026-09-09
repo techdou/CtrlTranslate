@@ -95,7 +95,9 @@ def snap_popup(qapp, theme: str, name: str) -> None:
 def _save_later(widget, qapp, path: Path) -> None:
     import time
 
-    QTimer.singleShot(60, lambda: (_save(widget, path), widget.close()))
+    # 两段式渲染：术语块在 on_done 后 dur_grow(180ms) 才追加，
+    # 等播完再截（60ms 会截到缺术语块的中间态）
+    QTimer.singleShot(400, lambda: (_save(widget, path), widget.close()))
     deadline = time.monotonic() + 3
     while widget.isVisible() and time.monotonic() < deadline:
         qapp.processEvents()

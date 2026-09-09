@@ -21,7 +21,7 @@ import math
 import re
 
 from PySide6.QtCore import QEvent, Qt, QTimer
-from PySide6.QtGui import QColor, QCursor, QGuiApplication, QTextCursor
+from PySide6.QtGui import QColor, QCursor, QGuiApplication, QTextCursor, QTextOption
 from PySide6.QtWidgets import (
     QApplication,
     QGraphicsDropShadowEffect,
@@ -111,6 +111,8 @@ class TranslatePopup(QWidget):
         self._grow_timer.timeout.connect(self._fit_height)
         self._terms: list[tuple[str, str]] = []  # 当前译文的术语表，☆ 链接收藏用
         self._placeholder_active = False  # loading 占位生效中，首块 chunk 需替换而非追加
+        self._source_expanded = False  # 原文预览展开全文中
+        self._source_prefix = "原文"   # 当前预览的标题行（含取词方式后缀）
         # 动效句柄：动画对象必须被持有（无引用会被 GC 中途停止）
         self._show_anim = None    # 出现：淡入+上浮
         self._close_anim = None   # 消失：淡出
@@ -157,11 +159,22 @@ class TranslatePopup(QWidget):
 
         head = QHBoxLayout()
         head.setSpacing(8)
-        self.source_label = QLabel()
+        # 只读可滚动的原文预览：超长原文可展开看全文（QLabel 不可滚，120 字后无处看全）
+        self.source_label = QTextBrowser()
         self.source_label.setObjectName("sourcePreview")
-        self.source_label.setWordWrap(True)
-        self.source_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.source_label.setOpenExternalLinks(False)
+        self.source_label.setOpenLinks(False)
+        self.source_label.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        self.source_label.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.source_label.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.source_label.setFrameShape(QTextBrowser.NoFrame)
+        self.source_label.setReadOnly(True)
         head.addWidget(self.source_label, 1)
+
+        self.btn_expand = QPushButton("全文")
+        self.btn_expand.setVisible(False)  # 仅原文超预览上限时出现
+        self.btn_expand.clicked.connect(self._toggle_source_expand)
+        head.addWidget(self.btn_expand, 0, Qt.AlignTop)
 
         self.btn_pin = QPushButton("钉住")
         self.btn_pin.setCheckable(True)
@@ -364,6 +377,29 @@ class TranslatePopup(QWidget):
         self._loading_widget.setGraphicsEffect(None)
         self.result_view.setVisible(True)
 
+    def _set_source_preview(self, source: str, prefix: str) -> None:
+        """折叠态原文预览：超上限截断并显示「全文」按钮。"""
+        self._source_expanded = False
+        self._source_prefix = prefix
+        truncated = len(source) > SOURCE_PREVIEW_LIMIT
+        self.btn_expand.setText("全文")
+        self.btn_expand.setVisible(truncated)
+        text = source[:SOURCE_PREVIEW_LIMIT] + ("…" if truncated else "")
+        self.source_label.setPlainText(f"{prefix}\n{text}")
+        self.source_label.setMaximumHeight(64)
+
+    def _toggle_source_expand(self) -> None:
+        """「全文/收起」：展开后内部滚动，窗口随内容重排。"""
+        self._source_expanded = not self._source_expanded
+        if self._source_expanded:
+            self.btn_expand.setText("收起")
+            self.source_label.setPlainText(f"{self._source_prefix}\n{self._source}")
+            self.source_label.setMaximumHeight(160)
+        else:
+            self._set_source_preview(self._source, self._source_prefix)
+        self.adjustSize()
+        self._fit_height()
+
     def _reset_for_show(self) -> None:
         """三种展示入口的公共复位：作废回调、解除拖拽冻结、记录本次锚点。
 
@@ -382,9 +418,8 @@ class TranslatePopup(QWidget):
         self._terms_timer.stop()
         self._reset_for_show()
         self._placeholder_active = True  # loading 占位在正文区，首块 chunk 需替换而非追加
-        preview = source[:SOURCE_PREVIEW_LIMIT] + ("…" if len(source) > SOURCE_PREVIEW_LIMIT else "")
         via = " · 取词：UIA" if method == "uia" else ""
-        self.source_label.setText(f"原文{via}\n{html.escape(preview)}")
+        self._set_source_preview(source, f"原文{via}")
         self.source_label.setVisible(True)
         # 上一次译文残留的 fixed 高度先复位，loading 态窗口收敛到骨架高度
         self.result_view.setFixedHeight(60)
@@ -417,8 +452,7 @@ class TranslatePopup(QWidget):
         self._terms_timer.stop()
         self._reset_for_show()
         self._placeholder_active = False
-        preview = source[:SOURCE_PREVIEW_LIMIT] + ("…" if len(source) > SOURCE_PREVIEW_LIMIT else "")
-        self.source_label.setText(f"原文\n{html.escape(preview)}")
+        self._set_source_preview(source, "原文")
         self.source_label.setVisible(True)
         self._hide_skeleton()
         self.result_view.setFixedHeight(60)  # 清掉上次残留的 fixed 高度，再由 _fit_height 按内容定
@@ -443,8 +477,9 @@ class TranslatePopup(QWidget):
         self._terms = []
         self._terms_timer.stop()
         self._placeholder_active = False
-        self.source_label.setText("")
+        self.source_label.setPlainText("")
         self.source_label.setVisible(False)  # 空文本时 padding+底色仍会渲染，整块隐藏
+        self.btn_expand.setVisible(False)
         self._loading_timer.stop()
         self._hide_skeleton()
         self.result_view.setFixedHeight(60)  # 同 show_translation：清掉上次残留的 fixed 高度

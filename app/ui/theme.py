@@ -13,6 +13,7 @@ MOTION = {
     "dur_grow": 180,        # 流式高度生长
     "dur_micro": 150,       # flash 提示、状态切换等微反馈
     "dur_fade_status": 200, # flash 状态淡出
+    "dur_mask_in": 80,      # 截图遮罩淡入上限——慢了耽误截图手感
     "breathe_ms": 1200,     # loading 骨架呼吸周期
     "ease_std": "OutCubic",     # 出现/生长标准曲线
     "ease_breathe": "InOutSine",  # 呼吸（正弦感）
