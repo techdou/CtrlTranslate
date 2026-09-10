@@ -59,3 +59,6 @@ secrets*
 *.pfx
 *.p12
 config.json
+
+# spike 验证产物（含 DeepSeek 登录 cookie，绝不入库）
+.spike-profile/
