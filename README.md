@@ -33,7 +33,10 @@
 
 ### 方式一：直接下载（推荐）
 
-从 [Releases](https://github.com/techdou/CtrlTranslate/releases/latest) 下载 `CtrlTranslate.exe`（约 70 MB，单文件免安装），双击运行，程序常驻系统托盘（可能被折叠到托盘溢出区）。
+从 [Releases](https://github.com/techdou/CtrlTranslate/releases/latest) 下载单文件免安装 exe，双击运行，程序常驻系统托盘（可能被折叠到托盘溢出区）：
+
+- `CtrlTranslate.exe`——轻量版（约 70 MB）：API 模式（需自备 API Key，智谱 GLM Flash 免费）
+- `CtrlTranslate-Web.exe`——完整版（约 220 MB）：额外支持网页版引擎（免 API Key 用 DeepSeek 网页免费额度）
 
 自行打包（双构建：轻量版约 70MB 不含网页组件；完整版约 220MB 支持网页版引擎）：
 
@@ -118,6 +121,7 @@ site/              # GitHub Pages 项目主页
 
 ## 版本历史
 
+- **v1.4.0**（2026-09-11）——**网页版引擎（免费额度）**：内嵌网页版 AI（默认 DeepSeek，登录一次长期有效），划词/截图免 API Key 翻译；译文弹窗一键切换引擎（API↔网页）；托盘支持开新会话、上传文档作上下文；配套修复 OCR 结果不显示的 P0 bug（任务号被守卫丢弃）与遮罩/热键双 bug；发版提供轻量版（约 70MB，无网页组件）与完整版（约 220MB，CtrlTranslate-Web.exe）双资产
 - **v1.3.0**（2026-09-09）——界面灵动化：弹窗动效（淡入上浮/骨架屏呼吸/流式平滑生长/术语渐次展开/错误微抖）、浮层阴影真圆角、截图框选 L 角标 + 像素尺寸徽标、原文「全文」展开、字号全局跟随；单实例升级为「唤醒已运行实例」；设置页补齐请求超时与朗读音量；西文字体改走 Segoe UI，深色主题下托盘菜单同步
 - **v1.2.0**（2026-09-08）——屏幕截图 OCR 翻译（Alt+Q 框选，GLM-4V-Flash 免费）+ WebDAV 备份/恢复（坚果云 / NAS）
 - **v1.1.0**（2026-09-07）——备用翻译服务自动切换、翻译缓存、术语 ☆ 收藏、来源筛选、自动检查更新
