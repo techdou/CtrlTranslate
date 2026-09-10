@@ -56,4 +56,6 @@ Desktop.ini
 secrets*
 *.pem
 *.key
+*.pfx
+*.p12
 config.json
