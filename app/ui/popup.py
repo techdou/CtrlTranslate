@@ -240,9 +240,16 @@ class TranslatePopup(QWidget):
         self.btn_engine = QPushButton()
         self.btn_engine.setObjectName("engineToggle")
         self.btn_engine.clicked.connect(self.engine_toggle_requested.emit)
+        # find_spec 只查存在性不加载 DLL——import 本体在部分环境（CI offscreen）
+        # 会因 Chromium 卸载崩溃把进程退出码改写成非零，测试全绿也判失败
         self._webengine_available = True
         try:
-            import PySide6.QtWebEngineCore  # noqa: F401
+            import importlib.util
+
+            import PySide6  # noqa: F401（父包，find_spec 解析子模块的前提）
+
+            if importlib.util.find_spec("PySide6.QtWebEngineCore") is None:
+                raise ImportError
         except ImportError:
             self._webengine_available = False
             self.btn_engine.hide()
