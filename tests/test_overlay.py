@@ -98,3 +98,45 @@ def test_overlay_tiny_drag_cancels():
     assert cancelled == [True]
     assert overlay._masks == []
     _ = MIN_SELECT_PX
+
+
+# ---------------------------------------------------------------- 预抓快照方案
+
+def test_overlay_selection_crops_pregrabbed_shot():
+    """成图必须裁自预抓快照，而不是选完再抓屏。
+
+    回归：旧实现松开鼠标时才 grabWindow——遮罩还盖在屏上，压暗层（甚至
+    遮罩底色）被一起拍进图里，OCR 拿到的是脏图。替换快照为纯色测试图后
+    框选，返回图应全是该纯色；若实现错误（二次抓屏），抓到的是真实屏幕。
+    """
+    from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QPixmap
+    from PySide6.QtTest import QTest
+
+    from app.ui.overlay import ScreenshotOverlay
+
+    overlay = ScreenshotOverlay()
+    got = []
+    overlay.selected.connect(lambda png: got.append(png))
+    overlay.show()
+    mask = overlay._masks[0]
+    shot = QPixmap(400, 300)
+    shot.fill(QColor("#FF00FF"))
+    mask._shot = shot  # 模拟"触发瞬间的屏幕"是一块品红
+
+    # 强制同步渲染一次 paintEvent：快照铺底 + 压暗叠加必须可渲染
+    rendered = mask.grab().toImage()
+    assert rendered.pixelColor(5, 5) != QColor("#FF00FF")  # 选区外叠了 30% 压暗
+    r = rendered.pixelColor(5, 5).red()
+    assert 100 < r < 200  # 比原色 255 明显暗，但不是黑墙（旧 bug：不透明底色墙）
+
+    QTest.mousePress(mask, Qt.MouseButton.LeftButton, pos=QPoint(100, 100))
+    QTest.mouseMove(mask, pos=QPoint(200, 200))
+    QTest.mouseRelease(mask, Qt.MouseButton.LeftButton, pos=QPoint(200, 200))
+    assert len(got) == 1
+
+    img = QImage.fromData(got[0], "PNG")
+    assert not img.isNull()
+    assert img.pixelColor(2, 2) == QColor("#FF00FF")
+    assert img.pixelColor(img.width() - 3, img.height() - 3) == QColor("#FF00FF")
+    assert overlay._masks == []

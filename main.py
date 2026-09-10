@@ -8,7 +8,7 @@ from __future__ import annotations
 import base64
 import sys
 
-from PySide6.QtCore import QTimer, QUrl
+from PySide6.QtCore import QObject, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
@@ -50,8 +50,13 @@ def load_icon() -> QIcon:
     return QIcon()
 
 
-class CtrlApp:
+class CtrlApp(QObject):
+    """必须继承 QObject：热键/取词/更新检查的信号都从工作线程 emit，
+    接收者带主线程亲和（QObject）Qt 才会排队回主线程执行；否则是直连——
+    回调在钩子线程里直接建 GUI 对象（如 OCR 遮罩），违反 Qt 线程规则。"""
+
     def __init__(self, qapp: QApplication):
+        super().__init__()
         self.qapp = qapp
         self.cfg = load_config()
 

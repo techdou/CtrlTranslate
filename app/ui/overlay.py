@@ -1,8 +1,10 @@
-"""屏幕截图遮罩：全屏压暗 + 拖拽框选 + Esc 取消。
+"""屏幕截图遮罩：预抓全屏快照铺底 + 压暗 + 拖拽框选 + Esc 取消。
 
+热键触发瞬间对每屏 QScreen.grabWindow(0) 抓一张静态快照：遮罩窗口把
+快照铺满屏再叠加 30% 压暗——框选时看到的就是将截到的画面（所见即所得，
+遮罩窗口本身不需要半透明），松开后直接从快照裁剪，遮罩绝不会混入成图。
 每屏一个全屏无边框遮罩窗口（跨屏拖拽不合并，选区钳制在本屏内），
-松开后从选区所在屏 QScreen.grabWindow(0)（物理像素）裁剪，长边超限等比
-缩小后以 PNG bytes 发 selected 信号。
+长边超限等比缩小后以 PNG bytes 发 selected 信号。
 """
 
 from __future__ import annotations
@@ -10,7 +12,7 @@ from __future__ import annotations
 import logging
 
 from PySide6.QtCore import QObject, QPoint, QRect, Qt, Signal
-from PySide6.QtGui import QColor, QCursor, QImage, QPainter, QPen
+from PySide6.QtGui import QColor, QCursor, QImage, QPainter, QPixmap, QPen
 from PySide6.QtWidgets import QApplication, QWidget
 
 from app.ui.motion import animate
@@ -46,7 +48,7 @@ def to_physical_rect(x: int, y: int, w: int, h: int, dpr: float,
     return (px, py, pw, ph)
 
 
-def downscale(image: QImage, max_side: int = MAX_SIDE_PX) -> QImage:
+def downscale(image: QImage | QPixmap, max_side: int = MAX_SIDE_PX) -> QImage | QPixmap:
     """长边超限等比缩小（保持宽高比；只缩不放）。"""
     side = max(image.width(), image.height())
     if side <= max_side:
@@ -60,7 +62,7 @@ def downscale(image: QImage, max_side: int = MAX_SIDE_PX) -> QImage:
     )
 
 
-def png_bytes(image: QImage) -> bytes:
+def png_bytes(image: QImage | QPixmap) -> bytes:
     from PySide6.QtCore import QBuffer, QIODevice
 
     buf = QBuffer()
@@ -70,12 +72,13 @@ def png_bytes(image: QImage) -> bytes:
 
 
 class _ScreenMask(QWidget):
-    """单屏遮罩：压暗背景 + 自绘选区（亮边框、选区内不压暗）。"""
+    """单屏遮罩：预抓快照铺底 + 压暗 + 自绘选区（亮边框、选区内不压暗）。"""
 
-    def __init__(self, screen, overlay: "ScreenshotOverlay"):
+    def __init__(self, screen, shot: QPixmap, overlay: "ScreenshotOverlay"):
         super().__init__(None)
         self._overlay = overlay
         self._screen = screen
+        self._shot = shot  # 触发瞬间的全屏快照（物理像素），也是最终裁剪源
         self._origin: QPoint | None = None
         self._selection = QRect()  # 本窗口 local 坐标
 
@@ -119,10 +122,11 @@ class _ScreenMask(QWidget):
         if rect.width() < MIN_SELECT_PX or rect.height() < MIN_SELECT_PX:
             self._overlay.cancel()  # 误触/单击 → 取消
             return
-        self._overlay._finish_selection(self._screen, rect)
+        self._overlay._finish_selection(self, rect)
 
     def paintEvent(self, event) -> None:
         p = QPainter(self)
+        p.drawPixmap(self.rect(), self._shot)  # 快照铺底：框选时看到的就是将截到的画面
         if self._selection.isNull():
             p.fillRect(self.rect(), DIM_COLOR)
         else:
@@ -186,7 +190,14 @@ class ScreenshotOverlay(QObject):
             self.cancel()
             return
         for screen in screens:
-            mask = _ScreenMask(screen, self)
+            # 触发瞬间先抓快照：既作遮罩铺底又作最终裁剪源——若等选完再抓，
+            # 遮罩自己还在屏上，会把压暗层一起拍进图里
+            shot = screen.grabWindow(0)
+            if shot.isNull():
+                logger.error("screen grab failed: %s", screen.name())
+                self.cancel()
+                return
+            mask = _ScreenMask(screen, shot, self)
             # 快速淡入给"入场感"，80ms 上限不耽误截图手感；句柄挂 mask 防止被 GC 中断
             mask.setWindowOpacity(0.0)
             mask.show()
@@ -209,13 +220,13 @@ class ScreenshotOverlay(QObject):
 
     # ---- 内部 ----
 
-    def _finish_selection(self, screen, local_rect: QRect) -> None:
+    def _finish_selection(self, mask: _ScreenMask, local_rect: QRect) -> None:
         if self._done:
             return
         self._done = True
         try:
-            image = screen.grabWindow(0)  # 全屏物理像素
-            dpr = screen.devicePixelRatio()
+            image = mask._shot  # 预抓快照（物理像素），遮罩已铺底展示，不能再抓屏
+            dpr = mask._screen.devicePixelRatio()
             px, py, pw, ph = to_physical_rect(
                 local_rect.x(), local_rect.y(), local_rect.width(), local_rect.height(),
                 dpr, image.width(), image.height(),

@@ -1,4 +1,18 @@
+import time
+
+import pytest
+
 from app.core.hotkey import DoubleTapDetector
+
+pytestmark = pytest.mark.usefixtures("qapp")
+
+
+@pytest.fixture()
+def qapp():
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    yield app
 
 
 def fresh(interval=300, key="ctrl"):
@@ -116,3 +130,49 @@ def test_service_set_key_switches_detector():
     assert svc.detector.interval_ms == 450  # 切键不丢间隔配置
     svc.set_key("alt")  # 幂等：重复设置不重建
     assert svc.detector.target_key == "alt"
+
+
+# ---------------------------------------------------------------- SimpleHotkey 跨线程语义
+
+def test_simple_hotkey_signal_queued_to_receiver_thread(qapp):
+    """keyboard 钩子线程 emit → QObject 接收者必须排队到主线程执行。
+
+    回归：接收者若非 QObject，Qt 走直连——回调在钩子线程跑，OCR 遮罩
+    曾因此在非 GUI 线程创建窗口（未定义行为，实际表现为按热键无反应）。
+    """
+    import threading
+
+    from PySide6.QtCore import QThread, QObject
+
+    from app.core.hotkey import SimpleHotkey
+
+    class Sink(QObject):
+        def __init__(self):
+            super().__init__()
+            self.threads = []
+
+        def on_fire(self):
+            self.threads.append(QThread.currentThread())
+
+    main_thread = QThread.currentThread()
+    sink = Sink()
+    hk = SimpleHotkey()
+    hk.triggered.connect(sink.on_fire)
+
+    fired = threading.Event()
+
+    def hook_thread():
+        hk._fire()  # 模拟 keyboard 库在钩子线程调 _fire
+        fired.set()
+
+    worker = threading.Thread(target=hook_thread)
+    worker.start()
+    worker.join(timeout=5)
+    assert fired.is_set()
+    assert sink.threads == []  # 没有直连在钩子线程执行，而是排队等主线程派发
+
+    deadline = time.monotonic() + 5
+    while not sink.threads and time.monotonic() < deadline:
+        qapp.processEvents()
+    assert len(sink.threads) == 1
+    assert sink.threads[0] is main_thread  # 回调落在主线程
