@@ -47,6 +47,13 @@ WEBAI_TRANSLATE_PROMPT_CONCISE = (
 )
 
 
+def toggle_webai_enabled(cfg: dict) -> bool:
+    """翻转网页引擎开关并返回新状态（弹窗一键切的配置写入，纯函数便于单测）。"""
+    web = cfg.setdefault("webai", {})
+    web["enabled"] = not web.get("enabled", False)
+    return web["enabled"]
+
+
 def load_icon() -> QIcon:
     # 开发环境：项目 assets/；打包后：_MEIPASS/assets/ 或 exe 同级
     from pathlib import Path
@@ -137,6 +144,7 @@ class CtrlApp(QObject):
         self.webai.login_required.connect(self.on_webai_login_required)
         self.webai.upload_done.connect(self.on_webai_upload_done)
         self.popup.ocr_retry_requested.connect(self.on_ocr_retry)
+        self.popup.engine_toggle_requested.connect(self.on_engine_toggle)
 
         self.tray.settings_requested.connect(self.open_settings)
         self.tray.library_requested.connect(self.open_library)
@@ -229,6 +237,17 @@ class CtrlApp(QObject):
         png = getattr(self, "_last_ocr_png", None)
         if png:
             self._on_ocr_selected(png)
+
+    def on_engine_toggle(self) -> None:
+        """弹窗一键切换引擎：写配置（单入口）+ 同步设置页勾选 + 状态栏反馈。"""
+        enabled = toggle_webai_enabled(self.cfg)
+        save_config(self.cfg)
+        self.popup.refresh_engine_button()
+        self.popup._flash_status("已切换为网页版引擎，下次划词生效" if enabled
+                                 else "已切换为 API 模式，下次划词生效")
+        # 设置窗开着时同步勾选，防保存时旧勾选覆盖刚切的引擎
+        if self._settings is not None:
+            self._settings.ck_webai.setChecked(enabled)
 
     def on_webai_login_required(self) -> None:
         # 引擎已弹窗口引导登录；错误文案经 failed（划词）或 upload_done（上传）

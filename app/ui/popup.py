@@ -80,7 +80,8 @@ def _parse_terms(text: str) -> list[tuple[str, str]]:
 
 
 class TranslatePopup(QWidget):
-    ocr_retry_requested = Signal()   # OCR 重试：截图 bytes 在 main 手里，交还重走截图链
+    ocr_retry_requested = Signal()      # OCR 重试：截图 bytes 在 main 手里，交还重走截图链
+    engine_toggle_requested = Signal()  # 切换翻译引擎（API↔网页）：配置写入归 main 单入口
 
     def __init__(self, cfg_getter, tts, translator, parent: QWidget | None = None):
         super().__init__(parent)
@@ -234,7 +235,20 @@ class TranslatePopup(QWidget):
                   self.btn_copy, self.btn_retry):
             btns.addWidget(b)
         btns.addStretch(1)
+        # 引擎切换（右端，与左侧"本条译文操作"分离）：显示当前引擎，点击切换，
+        # 下次划词生效。轻量版（无 WebEngine 组件）隐藏
+        self.btn_engine = QPushButton()
+        self.btn_engine.setObjectName("engineToggle")
+        self.btn_engine.clicked.connect(self.engine_toggle_requested.emit)
+        self._webengine_available = True
+        try:
+            import PySide6.QtWebEngineCore  # noqa: F401
+        except ImportError:
+            self._webengine_available = False
+            self.btn_engine.hide()
+        btns.addWidget(self.btn_engine)
         box.addLayout(btns)
+        self.refresh_engine_button()
 
         self.btn_speak_source.clicked.connect(
             lambda: self._toggle_speak("en", self.btn_speak_source))
@@ -243,6 +257,15 @@ class TranslatePopup(QWidget):
         self.btn_star.clicked.connect(self._star)
         self.btn_copy.clicked.connect(self._copy)
         self.btn_retry.clicked.connect(self._retry)
+
+    def refresh_engine_button(self) -> None:
+        """按当前配置刷新引擎钮文案（main 切换配置后回调 + 每次弹窗展示时）。"""
+        if not self._webengine_available:
+            return
+        webai_on = bool(self._cfg_getter().get("webai", {}).get("enabled"))
+        self.btn_engine.setText("网页" if webai_on else "API")
+        self.btn_engine.setToolTip(
+            f"翻译引擎：{'网页版（免费额度）' if webai_on else 'API 模式'}——点击切换，下次划词生效")
 
     def _apply_style(self) -> None:
         cfg = self._cfg_getter().get("popup", {})
@@ -451,6 +474,7 @@ class TranslatePopup(QWidget):
         for b in (self.btn_speak_trans, self.btn_star, self.btn_copy):
             b.setEnabled(False)
 
+        self.refresh_engine_button()  # 弹窗每次出现读最新引擎配置
         self._place_near_anchor()
         self._show_skeleton()  # 定位后再算骨架条宽（width 已定准）
         self.show_animated()

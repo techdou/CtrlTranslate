@@ -77,6 +77,7 @@ def test_popup_show_translation_contract():
     assert not missing, f"show_translation 缺参数：{missing}（main 接线依赖）"
     assert hasattr(TranslatePopup, "adopt_task")
     assert hasattr(TranslatePopup, "ocr_retry_requested")
+    assert hasattr(TranslatePopup, "engine_toggle_requested")
 
 
 def test_tray_webai_signals_exist():

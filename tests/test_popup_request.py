@@ -120,3 +120,44 @@ def test_show_result_resets_engine_state(popup):
     assert p._engine is None and p._method == "" and p._payload is None
     p._retry()  # 回看后的重试走默认 API 翻译器（eng），不再走 alt
     assert eng.calls and eng.calls[-1][0] == "历史原文"
+
+
+# ---------------------------------------------------------------- 引擎一键切换
+
+def test_engine_button_toggles_and_refreshes(popup):
+    """切换钮：点击发信号（main 写配置）；文案随 cfg 刷新（当前引擎所见即所得）。"""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    import app.config as config
+
+    p, _eng = popup
+    cfg = config.DEFAULT_CONFIG.copy()
+    # fixture 的 cfg_getter 返回 DEFAULT_CONFIG 常量——换可变 dict 才能反映切换
+    p._cfg_getter = lambda: cfg
+
+    got = []
+    p.engine_toggle_requested.connect(lambda: got.append(True))
+    assert p.btn_engine.text() == "API"          # 默认关网页 → 显示当前引擎 API
+
+    QTest.mouseClick(p.btn_engine, Qt.MouseButton.LeftButton)
+    assert got == [True]                          # 只发信号，popup 不自己写配置
+
+    cfg["webai"]["enabled"] = True                # 模拟 main 已写配置并回调刷新
+    p.refresh_engine_button()
+    assert p.btn_engine.text() == "网页"
+    assert "网页版" in p.btn_engine.toolTip()
+
+
+def test_toggle_webai_enabled_pure_function():
+    import main
+
+    cfg = {"webai": {"enabled": False}}
+    assert main.toggle_webai_enabled(cfg) is True
+    assert cfg["webai"]["enabled"] is True        # 原地翻转
+    assert main.toggle_webai_enabled(cfg) is False
+    assert cfg["webai"]["enabled"] is False
+    # 无 webai 段的旧配置也能安全翻转
+    cfg2 = {}
+    assert main.toggle_webai_enabled(cfg2) is True
+    assert cfg2["webai"]["enabled"] is True
