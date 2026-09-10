@@ -118,13 +118,16 @@ def test_probe_reply_stability_emits_chunk_and_finish(engine, qapp):
     assert engine._phase == "idle"
 
 
-def test_probe_reply_non_prefix_resends_full(engine, qapp):
+def test_probe_reply_non_prefix_emits_nothing(engine, qapp):
+    """非前缀扩展（站点重排/修正）不 emit——popup 只会追加渲染，全量重发
+    会拼出脏文本；保持旧文不动，等 finished 全量覆盖纠正。"""
     got_chunk = []
     engine.chunk.connect(lambda piece, _tid: got_chunk.append(piece))
     engine._phase = "reading"
     engine._reply_prev = "旧答案"
     engine._probe_reply({"replyText": "修正后的答案", "streaming": False})
-    assert got_chunk == ["修正后的答案"]  # 非前缀扩展全量重发
+    assert got_chunk == []                      # 不发增量
+    assert engine._reply_prev == "修正后的答案"  # 内部状态已跟上，finished 会全量纠正
 
 
 # ---------------------------------------------------------------- Phase 3：上传/新会话/崩溃恢复
@@ -222,3 +225,44 @@ def test_render_crash_recovers(engine, qapp):
     assert engine._phase == "idle"
     assert engine._page is None and engine._win is None
     assert closed == [1]
+
+
+# ---------------------------------------------------------------- review 修复回归
+
+def test_is_busy_reflects_phase(engine):
+    engine._phase = "idle"
+    assert engine.is_busy is False
+    engine._phase = "ready"
+    assert engine.is_busy is False
+    for phase in ("loading", "filling", "sending", "reading", "pasting", "uploading"):
+        engine._phase = phase
+        assert engine.is_busy is True
+
+
+def test_fail_routes_upload_to_upload_done(engine, qapp):
+    """上传流程失败必须走 upload_done——failed 会被 popup 任务号守卫丢弃。"""
+    got_upload, got_failed = [], []
+    engine.upload_done.connect(lambda ok, msg: got_upload.append((ok, msg)))
+    engine.failed.connect(lambda m, t: got_failed.append(m))
+    engine._phase = "uploading"          # 上传中被 _tick 超时
+    engine._fail("任务超时（120s）")
+    assert got_upload == [(False, "任务超时（120s）")]
+    assert got_failed == []
+    engine._phase = "reading"            # 普通翻译失败仍走 failed
+    engine._fail("翻译失败原因")
+    assert len(got_failed) == 1 and got_upload == [(False, "任务超时（120s）")]
+
+
+def test_fail_routes_pending_upload_even_in_loading(engine, qapp):
+    """upload 已排队（pending）但还没进 uploading 阶段就失败——同样分流。"""
+    got_upload = []
+    engine.upload_done.connect(lambda ok, msg: got_upload.append((ok, msg)))
+    engine._upload_pending = True
+    engine._phase = "loading"
+    engine._fail("网页加载失败")
+    assert got_upload == [(False, "网页加载失败")]
+    assert engine._upload_pending is False
+
+
+def test_new_session_returns_false_when_not_booted(engine):
+    assert engine.new_session() is False

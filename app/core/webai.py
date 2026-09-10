@@ -61,8 +61,6 @@ class DeepSeekAdapter:
         replyText: md.length ? md[md.length - 1].innerText.trim() : '',
         streaming: [...document.querySelectorAll('.ds-button')]
           .some(b => (b.innerText || '').includes('停止')),
-        visibleImgs: [...document.querySelectorAll('img')]
-          .filter(i => i.offsetWidth > 0 && i.offsetHeight > 0).length,
       };
     """)
 
@@ -221,9 +219,19 @@ class WebAIEngine(QObject):
         self._clip_saved: list | None = None
         self._upload_pending = False
         self._upload_path = ""
+        self._upload_deadline = 0.0
         self._ns_attempted = False
+        self._ns_deadline = 0.0
+        self._paste_attempts = 0
+        self._retract_after_task = False   # 任务前窗口是收着的才在收尾收回
+        self._nav_retries = 0
 
     # ---- 对外 API ----
+
+    @property
+    def is_busy(self) -> bool:
+        """有任务在途（调用方预检用，busy 时 submit 会被拒）。"""
+        return self._phase not in ("idle", "ready")
 
     def submit_text(self, text: str) -> int:
         """提交纯文本任务（划词翻译）。返回任务号；忙时返回 -1。"""
@@ -239,10 +247,12 @@ class WebAIEngine(QObject):
         use_cache 被忽略（网页会话自身有上下文，不落文本缓存）。"""
         return self.submit_text(text)
 
-    def new_session(self) -> None:
-        """开新会话（清上下文）：根导航优先，侧栏兜底（只试一次）。"""
+    def new_session(self) -> bool:
+        """开新会话（清上下文）：根导航优先，侧栏兜底（只试一次）。
+        引擎未启动（未 boot）时返回 False——调用方据此提示，勿谎报成功。"""
         if self._page is None:
-            return
+            logger.info("new session ignored: engine not booted")
+            return False
         self._task += 1  # 作废在途任务
         self._stop_poll()
         self._settle_clipboard()
@@ -252,6 +262,7 @@ class WebAIEngine(QObject):
         self._ns_deadline = time.monotonic() + PAGE_LOAD_TIMEOUT_S
         self._page.load(QUrl(self.adapter.url))
         self._start_poll(self._probe_new_session)
+        return True
 
     def show_window(self) -> None:
         """把网页窗口弹到前台（登录引导 / 手动对话用）。"""
@@ -320,6 +331,7 @@ class WebAIEngine(QObject):
         self._page = _WebAIPage.make(self._profile, self)
         # 渲染进程崩溃（显存/内存/Chromium bug）→ 作废任务并重建，下次任务自愈
         self._page.renderProcessTerminated.connect(self._on_render_crash)
+        self._page.loadFinished.connect(self._on_load_finished)
         # page 必须挂在窗口 view 上（裸 page 的 load/runJavaScript 不工作，
         # spike v3 120s 超时实证）；窗口默认最小化——不抢焦点不占屏，渲染照常
         self._win = _WebAIWindow.make(
@@ -329,6 +341,20 @@ class WebAIEngine(QObject):
         self._navigated = True
         self._page.load(QUrl(self.adapter.url))
         self._ensure_ready()  # boot 也走统一探测（登录检测/就绪分流）
+
+    def _on_load_finished(self, ok: bool) -> None:
+        if ok:
+            self._nav_retries = 0
+            return
+        # 加载失败重导航（限 3 次防循环）；否则 _navigated 已置位、probe 永假，
+        # 只能干等 120s 任务超时
+        self._nav_retries += 1
+        if self._nav_retries <= 3:
+            logger.warning("page load failed, re-navigate (%d/3)", self._nav_retries)
+            self._navigated = False
+            self._page.load(QUrl(self.adapter.url))
+        else:
+            self._fail("网页加载失败（网络不通或站点不可达）")
 
     def _on_render_crash(self, status, code) -> None:
         logger.error("render process terminated: status=%s code=%s", status, code)
@@ -408,8 +434,15 @@ class WebAIEngine(QObject):
 
     def _fail(self, why: str) -> None:
         logger.warning("task %s failed: %s", self._task, why)
+        upload = self._upload_pending or self._phase == "uploading"
+        self._upload_pending = False
         self._cleanup_task()
-        self.failed.emit(why, self._task)
+        if upload:
+            # 上传流程失败必须走 upload_done——failed 会撞 popup 任务号守卫被
+            # 静默丢弃（上传时刻 popup 不持有本任务号），托盘零通知
+            self.upload_done.emit(False, why)
+        else:
+            self.failed.emit(why, self._task)
 
     def _finish(self, text: str) -> None:
         logger.info("task %s finished (%d chars)", self._task, len(text))
@@ -511,6 +544,8 @@ class WebAIEngine(QObject):
         self._win.show()
 
     def _do_paste_image(self) -> None:
+        # 任务前窗口是收着的，收尾才收回；用户开着窗口手动对话时不抢
+        self._retract_after_task = not (self._win is not None and self._win.isVisible())
         self._ensure_window()
         self._win.showNormal()
         self._win.raise_()
@@ -533,8 +568,30 @@ class WebAIEngine(QObject):
         view = self._win.centralWidget()
         view.setFocus()
         self._run_js(self.adapter.focus_js(), lambda _r: None)
-        # 激活/焦点是异步的，稍等再发键盘
-        QTimer.singleShot(250, self._send_ctrl_v)
+        # 激活/焦点是异步的，且可能被前台锁拒绝——发键前必须验证焦点，
+        # 否则 Ctrl+V 会粘进用户当前窗口（污染输入）
+        self._paste_attempts = 0
+        QTimer.singleShot(300, self._check_focus_then_paste)
+
+    def _check_focus_then_paste(self) -> None:
+        if self._phase != "pasting":
+            return
+        self._run_js("JSON.stringify({f: document.hasFocus()})", self._on_focus_checked)
+
+    def _on_focus_checked(self, r) -> None:
+        if self._phase != "pasting":
+            return
+        if r and r.get("f"):
+            self._send_ctrl_v()
+            return
+        self._paste_attempts += 1
+        if self._paste_attempts >= 6:  # ~2s 内 6 次激活重试
+            self._fail("无法激活网页窗口接收粘贴（前台被其他程序占用）——请重试")
+            return
+        self._win.raise_()
+        self._win.activateWindow()
+        self._run_js(self.adapter.focus_js(), lambda _r: None)
+        QTimer.singleShot(300, self._check_focus_then_paste)
 
     def _send_ctrl_v(self) -> None:
         import ctypes
@@ -555,8 +612,9 @@ class WebAIEngine(QObject):
         self._do_fill()
 
     def _retract_window(self) -> None:
-        if self._win is not None and self._win.isVisible():
+        if self._retract_after_task and self._win is not None and self._win.isVisible():
             self._win.showMinimized()
+        self._retract_after_task = False
 
     # ---- 新会话 ----
 
@@ -596,10 +654,12 @@ class WebAIEngine(QObject):
         if text and text == self._reply_prev and not d.get("streaming"):
             self._stable += 1
         elif text != self._reply_prev:
-            if self._reply_prev and text.startswith(self._reply_prev):
+            if not self._reply_prev:
+                self.chunk.emit(text, self._task)  # 首块：popup 用它替换 loading 占位
+            elif text.startswith(self._reply_prev):
                 self.chunk.emit(text[len(self._reply_prev):], self._task)
-            elif text:
-                self.chunk.emit(text, self._task)  # 非前缀扩展（重排/修正）时全量重发
+            # 非前缀扩展（站点重排/修正）不发 chunk：popup 只会追加渲染，
+            # 全量重发会拼出脏文本——保持旧文不动，等 finished 全量覆盖纠正
             self._stable = 0
             self._reply_prev = text
         if self._stable >= REPLY_STABLE_ROUNDS and text:

@@ -20,7 +20,7 @@ import logging
 import math
 import re
 
-from PySide6.QtCore import QEvent, Qt, QTimer
+from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QCursor, QGuiApplication, QTextCursor, QTextOption
 from PySide6.QtWidgets import (
     QApplication,
@@ -80,6 +80,8 @@ def _parse_terms(text: str) -> list[tuple[str, str]]:
 
 
 class TranslatePopup(QWidget):
+    ocr_retry_requested = Signal()   # OCR 重试：截图 bytes 在 main 手里，交还重走截图链
+
     def __init__(self, cfg_getter, tts, translator, parent: QWidget | None = None):
         super().__init__(parent)
         self._cfg_getter = cfg_getter
@@ -419,10 +421,12 @@ class TranslatePopup(QWidget):
                 setattr(self, attr, None)
 
     def show_translation(self, source: str, method: str = "", force: bool = False,
-                         engine=None, request: bool = True) -> int:
+                         engine=None, request: bool = True, payload: str | None = None) -> int:
         """开始一次新的翻译展示。force=True 绕过缓存强制重译（重试入口）。
         engine=None 用默认 API 翻译器；传 WebAIEngine 则由网页引擎承接。
-        request=False 只展示不发请求（OCR：图片任务由调用方发起后 adopt_task 挂回）。"""
+        request=False 只展示不发请求（OCR：图片任务由调用方发起后 adopt_task 挂回）。
+        payload=实际发给引擎的内容（默认 source）——网页模式 source=原文仅预览，
+        payload=带翻译指令的完整 prompt，重试时重发 payload 而非 source。"""
         cfg = self._cfg_getter()
         self._source = source
         self._translated = ""
@@ -453,9 +457,18 @@ class TranslatePopup(QWidget):
         logger.info("popup shown: winId=%s visible=%s", self.winId(), self.isVisible())
         self._start_auto_close(cfg)
 
-        self._engine = engine  # 重试走同一引擎，网页模式重试不漂移回 API
+        self._engine = engine    # 重试走同一引擎，网页模式重试不漂移回 API
+        self._method = method    # OCR 重试分流依据
+        self._payload = payload  # 重试时重发的内容（网页模式=完整 prompt）
         if request:
-            self._task_id = (engine or self._translator).translate(source, use_cache=not force)
+            tid = (engine or self._translator).translate(
+                payload if payload is not None else source, use_cache=not force)
+            if tid == -1:
+                # 引擎忙被拒（调用方应预检，此处兜底防骨架屏永转）
+                self._task_id = -1
+                self.show_message("引擎正忙，请稍候重试")
+                return -1
+            self._task_id = tid
         else:
             self._task_id = -1  # 待 adopt_task 挂回真实任务
         return self._task_id
@@ -472,6 +485,10 @@ class TranslatePopup(QWidget):
         self._terms_timer.stop()
         self._reset_for_show()
         self._placeholder_active = False
+        # 历史条目的翻译引擎/方式未知：清空，重试回退默认 API 文本行为
+        self._engine = None
+        self._method = ""
+        self._payload = None
         self._set_source_preview(source, "原文")
         self.source_label.setVisible(True)
         self._hide_skeleton()
@@ -708,9 +725,17 @@ class TranslatePopup(QWidget):
         self._flash_status("已复制" + ("译文" if self._translated else "原文"))
 
     def _retry(self) -> None:
-        if self._source:
-            # 重试强制重译，绕过缓存；引擎跟随首次发起时的选择（API/网页）
-            self.show_translation(self._source, force=True, engine=getattr(self, "_engine", None))
+        if not self._source:
+            return
+        if getattr(self, "_method", "") == "ocr":
+            # OCR 的截图 bytes 不在 popup 手里——交还 main 重走截图链
+            # （旧实现把"屏幕截图 OCR"五个字当文本翻译，结果荒谬）
+            self.ocr_retry_requested.emit()
+            return
+        # 重试强制重译，绕过缓存；引擎与 payload 跟随首次发起时的选择
+        self.show_translation(self._source, force=True,
+                              engine=getattr(self, "_engine", None),
+                              payload=getattr(self, "_payload", None))
 
     def _on_pin_toggled(self, on: bool) -> None:
         self._pinned = on

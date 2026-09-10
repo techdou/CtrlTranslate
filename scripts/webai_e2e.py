@@ -1,11 +1,13 @@
 """WebAI 引擎真实 E2E：连 DeepSeek 网页跑文字翻译 + 贴图识别（手动跑，不进 CI）。
 
-前置：storage 目录里已有登录态（首跑用 spike 的登录：--storage .spike-profile）。
+前置：
+  - 先退出正在运行的 CtrlTranslate（含托盘）——两者共用 profile 目录
+    ~/.ctrltrans/webview，Chromium 同目录双进程会锁冲突
+  - 首跑会弹登录窗口，登录一次后 cookie 长期有效
 
 用法：
-  .venv/Scripts/python scripts/webai_e2e.py                 # 文字翻译
-  .venv/Scripts/python scripts/webai_e2e.py --image         # 追加贴图识别场景
-  .venv/Scripts/python scripts/webai_e2e.py --storage .spike-profile
+  .venv/Scripts/python scripts/webai_e2e.py             # 文字翻译
+  .venv/Scripts/python scripts/webai_e2e.py --image     # 追加贴图识别场景
 """
 
 from __future__ import annotations
