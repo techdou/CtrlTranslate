@@ -212,6 +212,11 @@ def get_clipboard_text() -> str:
         _user32.CloseClipboard()
 
 
+# 公开给其他模块复用（webai 贴图同样需要保存/恢复用户剪贴板）
+save_clipboard = _save_clipboard
+restore_clipboard = _restore_clipboard
+
+
 # ---------------------------------------------------------------- 模拟 Ctrl+C
 
 VK_CONTROL = 0x11
