@@ -28,25 +28,13 @@ def main() -> int:
     app = QApplication(sys.argv)
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--storage", default=str(ROOT / ".spike-profile"))
     parser.add_argument("--image", action="store_true", help="追加贴图识别场景")
     opts = parser.parse_args()
-    storage = Path(opts.storage)
-    storage.mkdir(parents=True, exist_ok=True)
 
     from app.core.webai import WebAIEngine
 
-    def boot_with_storage(self):
-        """E2E 用指定目录当 profile（复用 spike 登录态），正式代码用 ~/.ctrltrans。"""
-        from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
-
-        self._profile = QWebEngineProfile("webai-e2e", self)
-        self._profile.setPersistentStoragePath(str(storage))
-        self._page = QWebEnginePage(self._profile, self)
-        print(f"[e2e] storage={storage}")
-        self._ensure_ready()
-
-    WebAIEngine._boot = boot_with_storage
+    # 直接用引擎默认 profile（~/.ctrltrans/webview 正式路径），保持与真实运行一致；
+    # 首跑会弹出登录窗口，登录一次后 cookie 永久有效
 
     eng = WebAIEngine()
     state = {"scene": 1, "done": False, "retries": 0}

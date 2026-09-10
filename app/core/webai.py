@@ -197,8 +197,14 @@ class WebAIEngine(QObject):
         self._profile = QWebEngineProfile("webai", self)
         self._profile.setPersistentStoragePath(str(storage))
         self._page = QWebEnginePage(self._profile, self)
+        # page 必须挂在窗口 view 上（裸 page 的 load/runJavaScript 不工作，
+        # spike v3 120s 超时实证）；窗口默认最小化——不抢焦点不占屏，渲染照常
+        self._ensure_window()
+        self._win.showMinimized()
         logger.info("webai page booted, storage=%s", storage)
-        self._ensure_ready()
+        self._navigated = True
+        self._page.load(QUrl(self.adapter.url))
+        self._ensure_ready()  # boot 也走统一探测（登录检测/就绪分流）
 
     def _ensure_ready(self) -> None:
         """页面活着就直接用（避免每次任务重载丢会话节奏），否则导航。"""
@@ -318,10 +324,11 @@ class WebAIEngine(QObject):
     # ---- 动作：贴图（真实键盘输入管线）----
 
     def _ensure_window(self):
-        """贴图/登录需要可见窗口：裸 page 挂到窗口 view 上。"""
+        """贴图/登录需要可见窗口：page 挂到窗口 view 上（已有则弹到前台）。"""
         if self._win is not None:
             self._win.showNormal()
             self._win.raise_()
+            self._win.activateWindow()
             return
         from PySide6.QtWebEngineWidgets import QWebEngineView
         from PySide6.QtWidgets import QMainWindow
@@ -332,7 +339,6 @@ class WebAIEngine(QObject):
         view = QWebEngineView(self._win)
         view.setPage(self._page)
         self._win.setCentralWidget(view)
-        self._win.show()
         logger.info("webai window created")
 
     def _do_paste_image(self) -> None:
