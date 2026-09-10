@@ -23,6 +23,9 @@ class TrayController(QObject):
     about_requested = Signal()
     message_clicked = Signal()     # 托盘气泡被点击（转发 QSystemTrayIcon.messageClicked）
     quit_requested = Signal()
+    webai_window_requested = Signal()   # 打开内嵌网页窗口（登录 / 手动对话）
+    webai_new_session = Signal()        # 网页会话开新主题（清上下文）
+    webai_upload_requested = Signal()   # 上传文档到网页会话（上下文附件）
 
     def __init__(self, icon: QIcon, enabled: bool = True, key: str = "ctrl",
                  parent: QObject | None = None):
@@ -54,12 +57,25 @@ class TrayController(QObject):
         act_quit = QAction("退出", menu)
         act_quit.triggered.connect(self.quit_requested.emit)
 
+        # 网页版引擎子菜单（无网页任务时也可用：登录入口本就在这）
+        web_menu = QMenu("网页翻译", menu)
+        act_web_open = QAction("打开网页窗口（登录 / 对话）…", web_menu)
+        act_web_open.triggered.connect(self.webai_window_requested.emit)
+        act_web_new = QAction("开启新会话（清上下文）", web_menu)
+        act_web_new.triggered.connect(self.webai_new_session.emit)
+        act_web_upload = QAction("上传文档到会话…", web_menu)
+        act_web_upload.triggered.connect(self.webai_upload_requested.emit)
+        web_menu.addAction(act_web_open)
+        web_menu.addAction(act_web_new)
+        web_menu.addAction(act_web_upload)
+
         menu.addAction(self.act_enable)
         menu.addAction(self.act_autostart)
         menu.addSeparator()
         menu.addAction(act_settings)
         menu.addAction(act_library)
         menu.addAction(self.act_ocr)
+        menu.addMenu(web_menu)
         menu.addSeparator()
         menu.addAction(act_update)
         menu.addAction(act_about)

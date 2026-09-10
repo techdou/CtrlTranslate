@@ -125,3 +125,100 @@ def test_probe_reply_non_prefix_resends_full(engine, qapp):
     engine._reply_prev = "旧答案"
     engine._probe_reply({"replyText": "修正后的答案", "streaming": False})
     assert got_chunk == ["修正后的答案"]  # 非前缀扩展全量重发
+
+
+# ---------------------------------------------------------------- Phase 3：上传/新会话/崩溃恢复
+
+def test_upload_missing_file_emits_fail(engine, qapp):
+    got = []
+    engine.upload_done.connect(lambda ok, msg: got.append((ok, msg)))
+    engine.upload_file(r"Z:\不存在的文件.pdf")
+    assert got and got[0][0] is False
+    assert engine._phase == "idle"
+
+
+def test_upload_busy_rejected(engine, qapp):
+    got = []
+    engine.upload_done.connect(lambda ok, msg: got.append((ok, msg)))
+    engine._phase = "reading"
+    engine.upload_file("README.md")
+    assert got and got[0][0] is False and "忙" in got[0][1]
+
+
+def test_upload_probe_success(engine, qapp):
+    from types import SimpleNamespace
+
+    got = []
+    engine.upload_done.connect(lambda ok, msg: got.append((ok, msg)))
+    engine._phase = "uploading"
+    engine._page = SimpleNamespace(chooser_fired=True, file_to_feed=None,
+                                   deleteLater=lambda: None)
+    engine._probe_upload({"sendEnabled": True, "inputValue": ""})
+    assert got and got[0][0] is True
+    assert engine._phase == "idle"
+    assert engine._poll is None
+
+
+def test_upload_probe_timeout_no_chooser(engine, qapp):
+    from types import SimpleNamespace
+    import time as _t
+
+    got = []
+    engine.upload_done.connect(lambda ok, msg: got.append((ok, msg)))
+    engine._phase = "uploading"
+    engine._page = SimpleNamespace(chooser_fired=False, file_to_feed=None)
+    # chooseFiles 3s 宽限已过（deadline 距今 < VERIFY-3）
+    engine._upload_deadline = _t.monotonic() + 1
+    engine._probe_upload({"sendEnabled": False})
+    assert got and got[0][0] is False
+    assert engine._phase == "idle"
+
+
+def test_new_session_success_condition(engine, qapp):
+    import time as _t
+
+    from app.core.webai import PAGE_LOAD_TIMEOUT_S
+
+    engine._phase = "loading"
+    engine._ns_attempted = False
+    engine._ns_deadline = _t.monotonic() + PAGE_LOAD_TIMEOUT_S - 10  # 已过 2s settle
+    engine._probe_new_session({"url": "https://chat.deepseek.com/a/chat/s/new-id",
+                               "inputVisible": True, "replyText": "",
+                               "streaming": False})
+    assert engine._phase == "ready"
+    assert engine._poll is None
+
+
+def test_new_session_login_redirect_fails(engine, qapp):
+    got_fail, got_login = [], []
+    engine.failed.connect(lambda m, t: got_fail.append(m))
+    engine.login_required.connect(lambda: got_login.append(True))
+    engine._phase = "loading"
+    engine._ns_deadline = _t_deadline()
+    engine._probe_new_session({"url": "https://chat.deepseek.com/sign_in",
+                               "inputVisible": False})
+    assert got_login == [True]
+    assert got_fail and "未登录" in got_fail[0]
+    assert engine._phase == "idle"
+
+
+def _t_deadline():
+    import time
+    return time.monotonic() + 30
+
+
+def test_render_crash_recovers(engine, qapp):
+    from types import SimpleNamespace
+
+    got = []
+    engine.failed.connect(lambda m, t: got.append(m))
+    engine._phase = "reading"
+    closed = []
+    engine._win = SimpleNamespace(close=lambda: closed.append(1))
+    engine._win._allow_close = False
+    engine._page = SimpleNamespace(deleteLater=lambda: None)
+    engine._on_render_crash(2, 5)
+    assert got and "崩溃" in got[0]
+    assert engine._phase == "idle"
+    assert engine._page is None and engine._win is None
+    assert closed == [1]

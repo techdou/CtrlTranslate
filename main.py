@@ -127,10 +127,14 @@ class CtrlApp(QObject):
         self.webai.finished.connect(self.on_translated)
         self.webai.failed.connect(self.popup.on_error)
         self.webai.login_required.connect(self.on_webai_login_required)
+        self.webai.upload_done.connect(self.on_webai_upload_done)
 
         self.tray.settings_requested.connect(self.open_settings)
         self.tray.library_requested.connect(self.open_library)
         self.tray.ocr_requested.connect(self.on_ocr)
+        self.tray.webai_window_requested.connect(self.webai.show_window)
+        self.tray.webai_new_session.connect(self.on_webai_new_session)
+        self.tray.webai_upload_requested.connect(self.on_webai_upload)
         self.ocr_hotkey.triggered.connect(self.on_ocr)
         self.tray.enabled_changed.connect(self.on_enabled_changed)
         self.tray.autostart_changed.connect(self.on_autostart_changed)
@@ -199,6 +203,25 @@ class CtrlApp(QObject):
 
     def on_webai_login_required(self) -> None:
         self.popup.show_message("网页版未登录——请在弹出的网页窗口中登录 DeepSeek 后重试")
+
+    def on_webai_new_session(self) -> None:
+        self.webai.new_session()
+        self.tray.notify("网页翻译", "已开启新会话（上下文已清空）", 3)
+
+    def on_webai_upload(self) -> None:
+        from PySide6.QtWidgets import QFileDialog
+
+        path, _ = QFileDialog.getOpenFileName(
+            None, "选择要上传到网页会话的文档", "",
+            "文档 (*.pdf *.docx *.txt *.md *.tex);;所有文件 (*.*)")
+        if not path:
+            return
+        if not self._webai_enabled():
+            self.tray.notify("网页翻译", "未启用网页版引擎（设置 → 翻译服务），本次仍会上传", 5)
+        self.webai.upload_file(path)
+
+    def on_webai_upload_done(self, ok: bool, message: str) -> None:
+        self.tray.notify("文档上传" if ok else "上传失败", message, 6 if ok else 8)
 
     def _on_ocr_cancelled(self) -> None:
         self._discard_overlay()

@@ -29,6 +29,7 @@ REPLY_STABLE_ROUNDS = 2  # 连续 N 轮文本不变且无停止按钮 → 流式
 PAGE_LOAD_TIMEOUT_S = 30
 TASK_TIMEOUT_S = 120     # 单任务总超时（含流式）
 PASTE_SETTLE_MS = 1200   # 贴图后等缩略上传再填 prompt
+UPLOAD_VERIFY_S = 8      # 上传后等待附件就绪的上限
 
 
 # ---------------------------------------------------------------- 站点适配
@@ -60,6 +61,8 @@ class DeepSeekAdapter:
         replyText: md.length ? md[md.length - 1].innerText.trim() : '',
         streaming: [...document.querySelectorAll('.ds-button')]
           .some(b => (b.innerText || '').includes('停止')),
+        visibleImgs: [...document.querySelectorAll('img')]
+          .filter(i => i.offsetWidth > 0 && i.offsetHeight > 0).length,
       };
     """)
 
@@ -113,11 +116,80 @@ class DeepSeekAdapter:
           return {ok: true};
         """)
 
+    # 触发站点自带的文件上传入口：直接点隐藏的 input[type=file]（spike 已确认
+    # 其存在于聊天页）。Chromium 由此调用宿主 chooseFiles——引擎侧静默回填路径，
+    # 不弹系统对话框，无需用户手势
+    CLICK_FILE_INPUT = _js_wrap("""
+      const inp = document.querySelector('input[type=file]');
+      if (!inp) return {ok: false, why: 'no file input'};
+      inp.click();
+      return {ok: true};
+    """)
+
 
 ADAPTERS = {"deepseek": DeepSeekAdapter}
+# 新站点接入（如 kimi / chatgpt / doubao / gemini）：
+#   1. 复制 DeepSeekAdapter 为模板，改 name / url / login_marker；
+#   2. 跑 scripts/webview_spike.py 把 PROBE 指到新站点，从 report.json 抄真实 selector，
+#      逐个改 PROBE / FILL / SEND / NEW_SESSION / CLICK_FILE_INPUT；
+#   3. 注册进 ADAPTERS，config.webai.site 即可选新站点。
+#   注意：selector 必须真实页面验证过才注册——没验证的骨架宁可不 ship（切换了必坏）。
 
 
 # ---------------------------------------------------------------- 引擎
+
+class _WebAIPage:
+    """QWebEnginePage 子类工厂：chooseFiles 静默回填（upload_file 用）。
+
+    以工厂而非模块级类实现：PySide6 子类化需在 Qt 模块可用时定义，
+    引擎保持 QtWebEngine 惰性导入（无该模块的环境 API 模式照常可用）。
+    """
+
+    @staticmethod
+    def make(profile, parent):
+        from PySide6.QtWebEngineCore import QWebEnginePage
+
+        class _Page(QWebEnginePage):
+            file_to_feed = None      # upload_file 设置；非空时静默回填该路径
+            chooser_fired = False    # 本次 input.click 是否到达 chooseFiles
+
+            def chooseFiles(self, mode, oldFiles, acceptedMimeTypes):
+                self.chooser_fired = True
+                if self.file_to_feed:
+                    path, self.file_to_feed = self.file_to_feed, None
+                    logger.info("chooseFiles: feed %s silently", path)
+                    return [path]
+                return super().chooseFiles(mode, oldFiles, acceptedMimeTypes)
+
+        return _Page(profile, parent)
+
+
+class _WebAIWindow:
+    """承载窗口工厂：关闭按钮 = 最小化（保住 view——page 脱离 view 即失能）。"""
+
+    @staticmethod
+    def make(page, title: str):
+        from PySide6.QtWebEngineWidgets import QWebEngineView
+        from PySide6.QtWidgets import QMainWindow
+
+        class _Win(QMainWindow):
+            def closeEvent(self, event):
+                # 关闭 = 裸 page = load/runJavaScript 全失能（spike v3 实证），
+                # 拦截关闭改最小化；程序退出时 QApplication 销毁不受影响
+                if not getattr(self, "_allow_close", False):
+                    event.ignore()
+                    self.showMinimized()
+                    return
+                super().closeEvent(event)
+
+        win = _Win()
+        win.setWindowTitle(title)
+        win.resize(1100, 780)
+        view = QWebEngineView(win)
+        view.setPage(page)
+        win.setCentralWidget(view)
+        return win
+
 
 class WebAIEngine(QObject):
     """单会话串行引擎：同一时间只处理一个任务（网页会话本质串行）。
@@ -131,21 +203,25 @@ class WebAIEngine(QObject):
     finished = Signal(str, int)       # (完整回复, 任务号)
     failed = Signal(str, int)
     login_required = Signal()         # 网页未登录：上层应弹出窗口引导登录
+    upload_done = Signal(bool, str)   # 文档上传结果 (ok, 用户可读信息)
 
     def __init__(self, site: str = "deepseek", parent: QObject | None = None):
         super().__init__(parent)
         self.adapter = ADAPTERS.get(site, DeepSeekAdapter)()
         self._page = None
-        self._win = None        # 贴图时短暂前台的承载窗口
+        self._win = None        # 承载窗口（默认最小化；贴图/登录弹前台）
         self._poll: QTimer | None = None
         self._task = 0
-        self._phase = "idle"    # idle/loading/ready/filling/sending/reading
+        self._phase = "idle"    # idle/loading/ready/filling/sending/reading/pasting/uploading
         self._reply_prev = ""
         self._stable = 0
         self._deadline = 0.0
         self._pending_image = False
         self._pending_text = ""
         self._clip_saved: list | None = None
+        self._upload_pending = False
+        self._upload_path = ""
+        self._ns_attempted = False
 
     # ---- 对外 API ----
 
@@ -164,7 +240,7 @@ class WebAIEngine(QObject):
         return self.submit_text(text)
 
     def new_session(self) -> None:
-        """开新会话（清上下文）：根导航优先，侧栏兜底。"""
+        """开新会话（清上下文）：根导航优先，侧栏兜底（只试一次）。"""
         if self._page is None:
             return
         self._task += 1  # 作废在途任务
@@ -172,8 +248,40 @@ class WebAIEngine(QObject):
         self._settle_clipboard()
         logger.info("new session requested")
         self._phase = "loading"
+        self._ns_attempted = False
+        self._ns_deadline = time.monotonic() + PAGE_LOAD_TIMEOUT_S
         self._page.load(QUrl(self.adapter.url))
         self._start_poll(self._probe_new_session)
+
+    def show_window(self) -> None:
+        """把网页窗口弹到前台（登录引导 / 手动对话用）。"""
+        if self._page is None:
+            self._boot()  # 首次直接建 page+窗口并最小化，再弹出
+        self._ensure_window()
+
+    def upload_file(self, path: str) -> None:
+        """把文档喂给网页会话（作为后续翻译/问答的上下文附件）。
+
+        走站点自带上传：JS 点隐藏 input[type=file] → chooseFiles 静默回填。
+        结果经 upload_done 信号回报。
+        """
+        from pathlib import Path
+
+        if not Path(path).exists():
+            self.upload_done.emit(False, f"文件不存在：{path}")
+            return
+        if self._phase not in ("idle", "ready"):
+            self.upload_done.emit(False, f"引擎忙（{self._phase}），稍后再传")
+            return
+        self._upload_pending = True
+        self._upload_path = str(Path(path).resolve())
+        self._task += 1  # 作废在途任务
+        self._phase = "loading"
+        self._deadline = time.monotonic() + TASK_TIMEOUT_S
+        if self._page is None:
+            self._boot()
+        else:
+            self._ensure_ready()
 
     # ---- 任务装配 ----
 
@@ -193,7 +301,15 @@ class WebAIEngine(QObject):
         return self._task
 
     def _boot(self) -> None:
-        from PySide6.QtWebEngineCore import QWebEngineProfile, QWebEnginePage
+        try:
+            from PySide6.QtWebEngineCore import QWebEngineProfile
+        except ImportError:
+            # 轻量版（构建时排除 WebEngine）没有该组件：API 模式照常，网页模式给出指引
+            self._phase = "idle"
+            self.failed.emit(
+                "此构建未包含网页组件——请下载完整版（CtrlTranslate-Web），"
+                "或在设置中关闭「网页版引擎」改用 API 模式", self._task)
+            return
 
         # 用户数据跟项目惯例进 ~/.ctrltrans/，登录 cookie 长期有效
         from app.config import DATA_DIR
@@ -201,15 +317,34 @@ class WebAIEngine(QObject):
         storage.mkdir(parents=True, exist_ok=True)
         self._profile = QWebEngineProfile("webai", self)
         self._profile.setPersistentStoragePath(str(storage))
-        self._page = QWebEnginePage(self._profile, self)
+        self._page = _WebAIPage.make(self._profile, self)
+        # 渲染进程崩溃（显存/内存/Chromium bug）→ 作废任务并重建，下次任务自愈
+        self._page.renderProcessTerminated.connect(self._on_render_crash)
         # page 必须挂在窗口 view 上（裸 page 的 load/runJavaScript 不工作，
         # spike v3 120s 超时实证）；窗口默认最小化——不抢焦点不占屏，渲染照常
-        self._ensure_window()
+        self._win = _WebAIWindow.make(
+            self._page, f"CtrlTranslate · 网页翻译（{self.adapter.name}）")
         self._win.showMinimized()
         logger.info("webai page booted, storage=%s", storage)
         self._navigated = True
         self._page.load(QUrl(self.adapter.url))
         self._ensure_ready()  # boot 也走统一探测（登录检测/就绪分流）
+
+    def _on_render_crash(self, status, code) -> None:
+        logger.error("render process terminated: status=%s code=%s", status, code)
+        if self._phase not in ("idle", "ready"):
+            self.failed.emit("网页渲染进程崩溃，已自动恢复——请重试本条翻译", self._task)
+        # 销毁重建：page/view 全部弃用，下次任务走全新 _boot
+        self._stop_poll()
+        self._settle_clipboard()
+        if self._win is not None:
+            self._win._allow_close = True
+            self._win.close()
+            self._win = None
+        if self._page is not None:
+            self._page.deleteLater()
+            self._page = None
+        self._phase = "idle"
 
     def _ensure_ready(self) -> None:
         """页面活着就直接用（避免每次任务重载丢会话节奏），否则导航。"""
@@ -229,7 +364,9 @@ class WebAIEngine(QObject):
         if d.get("inputVisible"):
             # 输入框可用 = 页面就绪，直接开任务（有历史会话则上下文延续，是特性）
             self._phase = "ready"
-            if self._pending_image:
+            if self._upload_pending:
+                self._do_upload_file()
+            elif self._pending_image:
                 self._do_paste_image()
             else:
                 self._do_fill()
@@ -326,25 +463,52 @@ class WebAIEngine(QObject):
             self._start_poll(self._probe_reply)
         # 未解锁时下一轮 _probe_send 重试
 
+    # ---- 动作：文档上传 ----
+
+    def _do_upload_file(self) -> None:
+        self._phase = "uploading"
+        self._upload_pending = False
+        self._upload_deadline = time.monotonic() + UPLOAD_VERIFY_S
+        self._page.file_to_feed = self._upload_path
+        self._page.chooser_fired = False
+        self._run_js(self.adapter.CLICK_FILE_INPUT, lambda r: None)
+        logger.info("upload: file input clicked, path=%s", self._upload_path)
+        self._start_poll(self._probe_upload)
+
+    def _probe_upload(self, d) -> None:
+        if self._phase != "uploading" or d is None:
+            return
+        if not self._page.chooser_fired:
+            if time.monotonic() > self._upload_deadline - UPLOAD_VERIFY_S + 3:
+                self._phase = "idle"
+                self._stop_poll()
+                self.upload_done.emit(False, "上传入口未响应（站点可能改版），请打开网页窗口手动上传")
+            return
+        # chooseFiles 已回填路径：等站点上传完成（发送键解锁且输入框空 = 附件挂上）
+        if d.get("sendEnabled") and not d.get("inputValue"):
+            self._phase = "idle"
+            self._stop_poll()
+            logger.info("upload ok: attachment ready")
+            self.upload_done.emit(True, "文档已上传，后续翻译/问答将携带该文档上下文")
+            return
+        if time.monotonic() > self._upload_deadline:
+            self._phase = "idle"
+            self._stop_poll()
+            self.upload_done.emit(False, "上传超时——请打开网页窗口确认文件状态")
+
     # ---- 动作：贴图（真实键盘输入管线）----
 
     def _ensure_window(self):
-        """贴图/登录需要可见窗口：page 挂到窗口 view 上（已有则弹到前台）。"""
+        """贴图/登录需要可见窗口：把承载窗口弹到前台。"""
         if self._win is not None:
             self._win.showNormal()
             self._win.raise_()
             self._win.activateWindow()
             return
-        from PySide6.QtWebEngineWidgets import QWebEngineView
-        from PySide6.QtWidgets import QMainWindow
-
-        self._win = QMainWindow()
-        self._win.setWindowTitle(f"CtrlTranslate · 网页翻译（{self.adapter.name}）")
-        self._win.resize(1100, 780)
-        view = QWebEngineView(self._win)
-        view.setPage(self._page)
-        self._win.setCentralWidget(view)
-        logger.info("webai window created")
+        # 理论到不了这（page 与窗口同生共死）；兜底重建
+        self._win = _WebAIWindow.make(
+            self._page, f"CtrlTranslate · 网页翻译（{self.adapter.name}）")
+        self._win.show()
 
     def _do_paste_image(self) -> None:
         self._ensure_window()
@@ -404,13 +568,24 @@ class WebAIEngine(QObject):
             self.login_required.emit()
             self._fail("网页版未登录")
             return
-        # 根导航常直接给出新会话；若被重定向进旧会话再点侧栏兜底
-        if url.rstrip("/").endswith("chat.deepseek.com") and d.get("inputVisible"):
+        # 判定成功：输入框可用 + 无回复残留 + 非流式（新会话是空画布）。
+        # 不依赖根路径判断——DeepSeek 侧栏兜底成功后 url 是 /a/chat/s/<新id>。
+        # 至少等 2s：根→旧会话的重定向发生前页面可能短暂"空画布"造成误判
+        settled = time.monotonic() > self._ns_deadline - PAGE_LOAD_TIMEOUT_S + 2
+        if settled and d.get("inputVisible") and not (d.get("replyText") or "").strip() \
+                and not d.get("streaming"):
             self._phase = "ready"
             self._stop_poll()
-            logger.info("new session ready (root)")
+            logger.info("new session ready (url=%s)", url)
             return
-        self._run_js(self.adapter.NEW_SESSION, lambda r: logger.info("new-session fallback: %s", r))
+        # 根导航被重定向回旧会话 → 侧栏兜底，只试一次（防循环点击）
+        if not self._ns_attempted and time.monotonic() > self._ns_deadline - PAGE_LOAD_TIMEOUT_S + 5:
+            self._ns_attempted = True
+            self._run_js(self.adapter.NEW_SESSION, lambda r: logger.info("new-session fallback: %s", r))
+        if time.monotonic() > self._ns_deadline:
+            self._phase = "idle" if self._phase == "loading" else self._phase
+            self._stop_poll()
+            logger.warning("new session not confirmed within timeout (url=%s)", url)
 
     # ---- 读流式回复 ----
 
