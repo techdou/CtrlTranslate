@@ -1,6 +1,6 @@
 @echo off
-rem CtrlTranslate 轻量版打包（单 exe，无控制台窗口；约 70MB）
-rem 不含 WebEngine（网页版引擎在此构建中禁用并给出指引）——需要网页版用 build-web.bat
+rem CtrlTranslate 完整版打包（单 exe；约 220MB）
+rem 含 WebEngine = 网页版引擎（内嵌 DeepSeek 网页翻译）可用
 setlocal
 cd /d "%~dp0"
 
@@ -13,25 +13,21 @@ echo [build] cleaning old output...
 if exist build rmdir /s /q build
 if exist dist  rmdir /s /q dist
 
-echo [build] building CtrlTranslate.exe (light, no WebEngine) ...
+echo [build] building CtrlTranslate-Web.exe (full, with WebEngine) ...
 .venv\Scripts\pyinstaller ^
     --noconfirm --clean ^
     --windowed --onefile ^
-    --name CtrlTranslate ^
+    --name CtrlTranslate-Web ^
     --icon assets\icon.ico ^
     --add-data "assets\icon.png;assets" ^
     --hidden-import comtypes.stream ^
     --collect-submodules edge_tts ^
     --exclude-module PyQt5 ^
     --exclude-module tkinter ^
-    --exclude-module PySide6.QtWebEngineCore ^
-    --exclude-module PySide6.QtWebEngineWidgets ^
-    --exclude-module PySide6.QtWebEngineQuick ^
-    --exclude-module PySide6.QtWebChannel ^
     main.py || goto :fail
 
 echo.
-echo [build] done: dist\CtrlTranslate.exe
+echo [build] done: dist\CtrlTranslate-Web.exe
 exit /b 0
 
 :fail
