@@ -127,10 +127,10 @@ class WebAIEngine(QObject):
     用户可读原因）。
     """
 
-    chunk = Signal(str)          # 流式增量
-    finished = Signal(str, int)  # (完整回复, 任务号)
+    chunk = Signal(str, int)          # (流式增量, 任务号)
+    finished = Signal(str, int)       # (完整回复, 任务号)
     failed = Signal(str, int)
-    login_required = Signal()    # 网页未登录：上层应弹出窗口引导登录
+    login_required = Signal()         # 网页未登录：上层应弹出窗口引导登录
 
     def __init__(self, site: str = "deepseek", parent: QObject | None = None):
         super().__init__(parent)
@@ -157,6 +157,11 @@ class WebAIEngine(QObject):
         """提交图片任务（截图翻译）：贴图 + prompt 一起发送。"""
         self._image_bytes = png_bytes
         return self._submit(prompt, image=True)
+
+    def translate(self, text: str, use_cache: bool = False) -> int:
+        """与 Translator.translate 同名兼容：popup 统一入口直接切换引擎。
+        use_cache 被忽略（网页会话自身有上下文，不落文本缓存）。"""
+        return self.submit_text(text)
 
     def new_session(self) -> None:
         """开新会话（清上下文）：根导航优先，侧栏兜底。"""
@@ -417,9 +422,9 @@ class WebAIEngine(QObject):
             self._stable += 1
         elif text != self._reply_prev:
             if self._reply_prev and text.startswith(self._reply_prev):
-                self.chunk.emit(text[len(self._reply_prev):])
+                self.chunk.emit(text[len(self._reply_prev):], self._task)
             elif text:
-                self.chunk.emit(text)  # 非前缀扩展（重排/修正）时全量重发
+                self.chunk.emit(text, self._task)  # 非前缀扩展（重排/修正）时全量重发
             self._stable = 0
             self._reply_prev = text
         if self._stable >= REPLY_STABLE_ROUNDS and text:

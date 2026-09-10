@@ -406,6 +406,17 @@ class SettingsDialog(QDialog):
                               "智谱 glm-4v-flash 免费，填了翻译 Key 即可直接用")
         lbl_ocr_hint.setObjectName("dim")
 
+        # ---- 网页版引擎（免费额度） ----
+        webai = self.cfg.get("webai", {})
+        webai_head = QLabel("网页版引擎（免费额度）")
+        webai_head.setObjectName("sectionTitle")
+        self.ck_webai = QCheckBox("启用（划词/截图改走内嵌网页版 DeepSeek，无需 API Key）")
+        self.ck_webai.setChecked(webai.get("enabled", False))
+        lbl_webai_hint = QLabel("首次使用会弹出网页窗口，登录 DeepSeek 一次即可长期有效；"
+                                "速度取决于网页服务。与 API 模式二选一，重试按钮跟随各自引擎。")
+        lbl_webai_hint.setObjectName("dim")
+        lbl_webai_hint.setWordWrap(True)
+
         form.addRow("", self.ck_hotkey)
         form.addRow("触发键", self.cb_key)
         form.addRow("双击判定间隔", _hbox(self.sl_interval, self.lbl_interval))
@@ -417,6 +428,9 @@ class SettingsDialog(QDialog):
         form.addRow("识别模型", self.cb_ocr_model)
         form.addRow("截图热键", self.ed_ocr_hotkey)
         form.addRow("", lbl_ocr_hint)
+        form.addRow(webai_head)
+        form.addRow("", self.ck_webai)
+        form.addRow("", lbl_webai_hint)
         return _scroll(page)
 
     def _page_popup(self) -> QWidget:
@@ -755,6 +769,9 @@ class SettingsDialog(QDialog):
         o["enabled"] = self.ck_ocr.isChecked()
         o["model"] = self.cb_ocr_model.currentText().strip()
         o["hotkey"] = self.ed_ocr_hotkey.text().strip()
+
+        w = cfg.setdefault("webai", {})
+        w["enabled"] = self.ck_webai.isChecked()
 
         po = cfg["popup"]
         po["theme"] = self.cb_theme.currentData()

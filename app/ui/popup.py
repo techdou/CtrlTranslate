@@ -418,8 +418,11 @@ class TranslatePopup(QWidget):
                 anim.stop()
                 setattr(self, attr, None)
 
-    def show_translation(self, source: str, method: str = "", force: bool = False) -> int:
-        """开始一次新的翻译展示。force=True 绕过缓存强制重译（重试入口）。"""
+    def show_translation(self, source: str, method: str = "", force: bool = False,
+                         engine=None, request: bool = True) -> int:
+        """开始一次新的翻译展示。force=True 绕过缓存强制重译（重试入口）。
+        engine=None 用默认 API 翻译器；传 WebAIEngine 则由网页引擎承接。
+        request=False 只展示不发请求（OCR：图片任务由调用方发起后 adopt_task 挂回）。"""
         cfg = self._cfg_getter()
         self._source = source
         self._translated = ""
@@ -450,8 +453,16 @@ class TranslatePopup(QWidget):
         logger.info("popup shown: winId=%s visible=%s", self.winId(), self.isVisible())
         self._start_auto_close(cfg)
 
-        self._task_id = self._translator.translate(source, use_cache=not force)
+        self._engine = engine  # 重试走同一引擎，网页模式重试不漂移回 API
+        if request:
+            self._task_id = (engine or self._translator).translate(source, use_cache=not force)
+        else:
+            self._task_id = -1  # 待 adopt_task 挂回真实任务
         return self._task_id
+
+    def adopt_task(self, task_id: int) -> None:
+        """外部发起的任务接管本弹窗（OCR：文本任务号与图片任务号对齐）。"""
+        self._task_id = task_id
 
     def show_result(self, source: str, translated: str) -> None:
         """历史/生词本回看：直接展示已有译文，不发翻译请求（重试可重新发起）。"""
@@ -698,7 +709,8 @@ class TranslatePopup(QWidget):
 
     def _retry(self) -> None:
         if self._source:
-            self.show_translation(self._source, force=True)  # 重试强制重译，绕过缓存
+            # 重试强制重译，绕过缓存；引擎跟随首次发起时的选择（API/网页）
+            self.show_translation(self._source, force=True, engine=getattr(self, "_engine", None))
 
     def _on_pin_toggled(self, on: bool) -> None:
         self._pinned = on

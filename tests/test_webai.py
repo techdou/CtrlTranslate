@@ -80,7 +80,7 @@ def test_probe_reply_stability_emits_chunk_and_finish(engine, qapp):
     from PySide6.QtCore import QTimer
 
     got_chunk, got_final = [], []
-    engine.chunk.connect(got_chunk.append)
+    engine.chunk.connect(lambda piece, _tid: got_chunk.append(piece))
     engine.finished.connect(lambda text, tid: got_final.append(text))
     engine._phase = "reading"
     engine._start_poll(lambda d: engine._probe_reply(d))
@@ -120,7 +120,7 @@ def test_probe_reply_stability_emits_chunk_and_finish(engine, qapp):
 
 def test_probe_reply_non_prefix_resends_full(engine, qapp):
     got_chunk = []
-    engine.chunk.connect(got_chunk.append)
+    engine.chunk.connect(lambda piece, _tid: got_chunk.append(piece))
     engine._phase = "reading"
     engine._reply_prev = "旧答案"
     engine._probe_reply({"replyText": "修正后的答案", "streaming": False})

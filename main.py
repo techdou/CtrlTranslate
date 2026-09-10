@@ -21,6 +21,7 @@ from app.core.capture import TextCaptureService, get_foreground_app
 from app.core.singleton import SingleInstance
 from app.core.hotkey import HotkeyService, SimpleHotkey
 from app.core.translator import Translator
+from app.core.webai import WebAIEngine
 from app.core.tts import TTSService
 from app.core.update import UpdateChecker, is_newer
 from app.core.vocabulary import record_history
@@ -32,6 +33,11 @@ from app.ui.popup import TranslatePopup
 from app.ui.settings import SettingsDialog
 from app.ui.theme import build_qss, palette
 from app.ui.tray import TrayController
+
+# 网页模式截图翻译指令：跟随每次请求注入（网页会话无 system 角色，
+# 且长会话下首条指令会漂移——spike 实测）
+WEBAI_OCR_PROMPT = "识别图片中的文字，翻译成中文。只输出译文，不要解释。"
+
 
 def load_icon() -> QIcon:
     # 开发环境：项目 assets/；打包后：_MEIPASS/assets/ 或 exe 同级
@@ -74,6 +80,7 @@ class CtrlApp(QObject):
         )
         self.popup = TranslatePopup(self._cfg, self.tts, self.translator)
         self.ocr_hotkey = SimpleHotkey()
+        self.webai = WebAIEngine(parent=self)
         self.backup = BackupService()
 
         # 会话状态
@@ -116,6 +123,10 @@ class CtrlApp(QObject):
         self.translator.finished.connect(self.on_translated)
         self.translator.failed.connect(self.popup.on_error)
         self.translator.fallback_started.connect(self.popup.on_fallback_started)
+        self.webai.chunk.connect(self.popup.on_chunk)
+        self.webai.finished.connect(self.on_translated)
+        self.webai.failed.connect(self.popup.on_error)
+        self.webai.login_required.connect(self.on_webai_login_required)
 
         self.tray.settings_requested.connect(self.open_settings)
         self.tray.library_requested.connect(self.open_library)
@@ -155,9 +166,13 @@ class CtrlApp(QObject):
         self._current_app = get_foreground_app()
         self.capture.capture()
 
+    def _webai_enabled(self) -> bool:
+        return bool(self.cfg.get("webai", {}).get("enabled"))
+
     def on_captured(self, text: str, method: str) -> None:
         self._current_source = text
-        self.popup.show_translation(text, method)
+        engine = self.webai if self._webai_enabled() else None
+        self.popup.show_translation(text, method, engine=engine)
 
     # ---------------------------------------------------------------- OCR 截图翻译
 
@@ -175,8 +190,15 @@ class CtrlApp(QObject):
 
     def _on_ocr_selected(self, png: bytes) -> None:
         self._discard_overlay()
-        self.popup.show_translation("屏幕截图 OCR", method="ocr")
-        self.translator.translate_image(base64.b64encode(png).decode("ascii"))
+        self.popup.show_translation("屏幕截图 OCR", method="ocr", request=False)
+        if self._webai_enabled():
+            tid = self.webai.submit_image(png, WEBAI_OCR_PROMPT)
+        else:
+            tid = self.translator.translate_image(base64.b64encode(png).decode("ascii"))
+        self.popup.adopt_task(tid)
+
+    def on_webai_login_required(self) -> None:
+        self.popup.show_message("网页版未登录——请在弹出的网页窗口中登录 DeepSeek 后重试")
 
     def _on_ocr_cancelled(self) -> None:
         self._discard_overlay()

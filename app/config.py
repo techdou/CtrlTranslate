@@ -105,6 +105,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "model": "glm-4v-flash",    # 视觉模型（智谱免费）；地址与 Key 复用 provider 主服务
         "hotkey": "alt+q",          # OCR 截图热键（keyboard 库格式）；留空 = 禁用
     },
+    "webai": {
+        "enabled": False,           # 网页版引擎（免费额度）：启用后划词/截图改走内嵌网页
+        "site": "deepseek",         # 站点；当前仅 deepseek
+    },
     "tts": {
         "enabled": True,
         "engine": "auto",           # auto=先 edge-tts 失败转 SAPI / edge / sapi / custom
