@@ -24,4 +24,13 @@ jobs:
         run: pip install -r requirements.txt pytest
 
       - name: Run tests
-        run: python -m pytest tests/ -q
+        shell: pwsh
+        run: |
+          # PySide6 在 windows runner 上 pytest 全绿后进程退出阶段偶发崩溃（access violation，
+          # 见 2026-09-11 的 03f81c6 run：166 passed 仍 exit 1）——退出码非零时重试，最多 3 次
+          for ($i = 1; $i -le 3; $i++) {
+            python -m pytest tests/ -q
+            if ($LASTEXITCODE -eq 0) { exit 0 }
+            Write-Host "::warning::pytest attempt $i exited $LASTEXITCODE（teardown 偶发崩溃），重试"
+          }
+          exit $LASTEXITCODE
