@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import QObject, QPoint, QRect, Qt, Signal
+from PySide6.QtCore import QObject, QPoint, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QCursor, QImage, QPainter, QPixmap, QPen
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -81,6 +81,15 @@ class _ScreenMask(QWidget):
         self._shot = shot  # 触发瞬间的全屏快照（物理像素），也是最终裁剪源
         self._origin: QPoint | None = None
         self._selection = QRect()  # 本窗口 local 坐标
+        # 提示胶囊（"按住框选 · Esc 取消"）：驻留片刻后淡出，开始框选立即退场
+        self._hint_opacity = 1.0
+        self._hint_anim = None
+        self._hint_timer = QTimer(self)  # 挂在 mask 上，mask 销毁 timer 跟着销
+        self._hint_timer.setSingleShot(True)
+        self._hint_timer.timeout.connect(self.fade_hint)
+        # 新建选区角标微弹（1.35→1.0 落笔感）
+        self._corner_scale = 1.0
+        self._corner_anim = None
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
@@ -102,7 +111,27 @@ class _ScreenMask(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             self._origin = event.position().toPoint()
             self._selection = QRect(self._origin, self._origin)
+            self.fade_hint()  # 开始框选，提示胶囊立即退场
+            if self._corner_anim is not None:
+                self._corner_anim.stop()
+            self._corner_anim = animate(self._set_corner_scale, 1.35, 1.0,
+                                        MOTION["dur_micro"], MOTION["ease_std"])
             self.update()
+
+    def fade_hint(self) -> None:
+        """提示胶囊淡出；重复调用/已淡完时不动画。"""
+        if self._hint_anim is not None or self._hint_opacity <= 0.01:
+            return
+        self._hint_anim = animate(self._set_hint_opacity, self._hint_opacity, 0.0,
+                                  MOTION["dur_fade_status"], "OutQuad")
+
+    def _set_hint_opacity(self, v: float) -> None:
+        self._hint_opacity = v
+        self.update()
+
+    def _set_corner_scale(self, v: float) -> None:
+        self._corner_scale = v
+        self.update()
 
     def mouseMoveEvent(self, event) -> None:
         if self._origin is None:
@@ -129,6 +158,8 @@ class _ScreenMask(QWidget):
         p.drawPixmap(self.rect(), self._shot)  # 快照铺底：框选时看到的就是将截到的画面
         if self._selection.isNull():
             p.fillRect(self.rect(), DIM_COLOR)
+            if self._hint_opacity > 0.01:
+                self._draw_hint(p)
         else:
             # 选区四周压暗、选区内透亮
             s = self._selection
@@ -142,9 +173,29 @@ class _ScreenMask(QWidget):
             self._draw_size_badge(p, s)
         p.end()
 
+    def _draw_hint(self, p: QPainter) -> None:
+        """顶部居中的操作提示胶囊：告诉首次使用者怎么完成/取消，不打扰熟练用户。"""
+        text = "按住左键框选 · Esc 取消"
+        font = p.font()
+        font.setPixelSize(13)
+        p.setFont(font)
+        fm = p.fontMetrics()
+        bw = fm.horizontalAdvance(text) + 28
+        bh = fm.height() + 12
+        bx = (self.width() - bw) // 2
+        by = 28
+        p.save()
+        p.setOpacity(self._hint_opacity)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(0, 0, 0, 170))
+        p.drawRoundedRect(bx, by, bw, bh, bh / 2, bh / 2)
+        p.setPen(QColor(255, 255, 255, 235))
+        p.drawText(QRect(bx, by, bw, bh), Qt.AlignmentFlag.AlignCenter, text)
+        p.restore()
+
     def _draw_corner_arms(self, p: QPainter, s: QRect) -> None:
         """四角 L 形角标：截图工具的通用语言，比细框更醒目地锚定选区边界。"""
-        arm = CORNER_ARM_PX
+        arm = max(2, round(CORNER_ARM_PX * self._corner_scale))  # 新建选区时微弹
         for cx, cy, dx, dy in (
             (s.left(), s.top(), 1, 1), (s.right(), s.top(), -1, 1),
             (s.left(), s.bottom(), 1, -1), (s.right(), s.bottom(), -1, -1),
@@ -203,6 +254,7 @@ class ScreenshotOverlay(QObject):
             mask.show()
             mask._fade_in = animate(
                 mask.setWindowOpacity, 0.0, 1.0, MOTION["dur_mask_in"], "OutQuad")
+            mask._hint_timer.start(1800)  # 提示胶囊驻留后自动淡出
             self._masks.append(mask)
         # 键盘焦点给鼠标所在屏的遮罩，Esc 才有人接
         target = QApplication.screenAt(QCursor.pos()) or screens[0]
@@ -241,9 +293,11 @@ class ScreenshotOverlay(QObject):
 
     def _close_all(self) -> None:
         for mask in self._masks:
-            fade = getattr(mask, "_fade_in", None)  # 淡入 80ms 内取消时先停动画，
-            if fade is not None:                    # 否则回调打在已删除的 C++ 对象上刷 RuntimeError
-                fade.stop()
+            # 在途动画全部先停：否则回调打在已删除的 C++ 对象上刷 RuntimeError
+            for attr in ("_fade_in", "_hint_anim", "_corner_anim"):
+                anim = getattr(mask, attr, None)
+                if anim is not None:
+                    anim.stop()
             mask.close()
             mask.deleteLater()
         self._masks = []

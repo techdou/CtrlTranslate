@@ -28,7 +28,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
-    QSizePolicy,
     QTextBrowser,
     QVBoxLayout,
     QWidget,
@@ -38,6 +37,7 @@ from app.core.vocabulary import TERM_SECTION_RE, parse_terms
 from app.db import database
 from app.ui.motion import animate, breathe
 from app.ui.theme import MOTION, RADIUS, SHADOW, palette
+from app.ui.widgets import IconButton
 
 logger = logging.getLogger("ctrltrans.popup")
 
@@ -153,16 +153,16 @@ class TranslatePopup(QWidget):
         self.source_label.setReadOnly(True)
         head.addWidget(self.source_label, 1)
 
-        self.btn_expand = QPushButton("全文")
+        self.btn_expand = IconButton(
+            "chevron-down", "查看全文", fg=self._p["text_dim"], hover=self._p["accent"])
         self.btn_expand.setVisible(False)  # 仅原文超预览上限时出现
         self.btn_expand.clicked.connect(self._toggle_source_expand)
         head.addWidget(self.btn_expand, 0, Qt.AlignTop)
 
-        self.btn_pin = QPushButton("钉住")
+        self.btn_pin = IconButton(
+            "pin", "钉住：弹窗不再因点击其他程序而关闭",
+            fg=self._p["text_dim"], hover=self._p["accent"])
         self.btn_pin.setCheckable(True)
-        self.btn_pin.setToolTip("钉住后弹窗不再因点击其他程序而关闭")
-        self.btn_pin.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self.btn_pin.setMinimumWidth(64)  # 容纳「已钉住」三字；Fixed 策略防隐藏原文后吃满整行
         self.btn_pin.toggled.connect(self._on_pin_toggled)
         head.addWidget(self.btn_pin, 0, Qt.AlignTop | Qt.AlignRight)
         box.addLayout(head)
@@ -202,13 +202,18 @@ class TranslatePopup(QWidget):
         box.addWidget(self.status_label)
 
         btns = QHBoxLayout()
-        btns.setSpacing(6)
-        self.btn_speak_source = QPushButton("读原文")
-        self.btn_speak_trans = QPushButton("读译文")
-        self.btn_star = QPushButton("收藏")
-        self.btn_copy = QPushButton("复制")
-        self.btn_copy.setObjectName("primary")  # 复制是最高频动作，给主按钮视觉
-        self.btn_retry = QPushButton("重试")
+        btns.setSpacing(4)
+        fg, accent = self._p["text_dim"], self._p["accent"]
+        self.btn_speak_source = IconButton(
+            "volume-2", "朗读原文（朗读中再点停止）", fg=fg, hover=accent)
+        self.btn_speak_trans = IconButton(
+            "volume-2", "朗读译文（朗读中再点停止）", fg=fg, hover=accent)
+        self.btn_star = IconButton("star", "收藏到生词本", fg=fg, hover=accent)
+        # 复制是最高频动作：保留主按钮实底，图标用 accent_text 色
+        self.btn_copy = IconButton(
+            "copy", "复制译文", fg=self._p["accent_text"], hover=self._p["accent_text"])
+        self.btn_copy.setObjectName("primary")
+        self.btn_retry = IconButton("rotate-cw", "重试（绕过缓存强制重译）", fg=fg, hover=accent)
         for b in (self.btn_speak_source, self.btn_speak_trans, self.btn_star,
                   self.btn_copy, self.btn_retry):
             btns.addWidget(b)
@@ -269,34 +274,57 @@ class TranslatePopup(QWidget):
                 border: 1px solid {p['border']};
                 border-radius: {RADIUS['md']}px;
             }}
-            QLabel#sourcePreview {{
-                background: {p['source_bg']};
-                border-radius: {RADIUS['sm']}px;
-                padding: 8px;
-                font-size: {fs_small}px;
-                color: {p['text_dim']};
-            }}
             QLabel {{ background: transparent; border: none; }}
             QLabel#skBar {{
                 background: {p['border']};
                 border-radius: {RADIUS['xs']}px;
             }}
             QLabel#skHint {{ color: {p['text_dim']}; }}
+            /* 原文预览是 QTextBrowser 不是 QLabel（此前 QLabel#sourcePreview 从不命中，
+               预览块裸奔用正文字号/正文色，和译文区一个视觉权重）。id 选择器直接命中。 */
+            #sourcePreview {{
+                background: {p['source_bg']};
+                border-radius: {RADIUS['sm']}px;
+                padding: 6px 8px;
+                font-size: {fs_small}px;
+                color: {p['text_dim']};
+            }}
             QTextBrowser {{
                 background: transparent; border: none;
                 font-size: {fs}px; color: {p['text']};
                 selection-background-color: {p['accent']};
             }}
-            /* 按钮只声明与全局 theme.py 的布局差异（弹窗空间敏感，padding 更紧凑、
-               字号随用户设置）；颜色/hover/checked/disabled/primary 规则统一走全局，
-               此前两处各写一套已经分叉过一次（padding 4/12 vs 6/16）。 */
-            QPushButton {{
+            /* 图标按钮：幽灵风（无边框，hover 淡底），形状归 QSS、图标着色归
+               IconButton 自身。全局 QPushButton 规则仍命中它（focus 粗框要去掉）。 */
+            IconButton {{
+                background: transparent;
+                border: none;
+                border-radius: {RADIUS['sm']}px;
+                padding: 0px;
+            }}
+            IconButton:hover {{ background: {p['panel2']}; }}
+            IconButton:pressed {{ background: {p['panel2']}; }}
+            IconButton:focus {{ border: none; padding: 0px; }}
+            IconButton:disabled {{ background: transparent; }}
+            IconButton#primary {{ background: {p['accent']}; }}
+            IconButton#primary:hover {{ background: {p['accent_hover']}; }}
+            /* 引擎切换保留文字（状态信息图标表意差），收成胶囊与图标按钮区分 */
+            QPushButton#engineToggle {{
                 color: {p['text_dim']};
-                padding: 4px 12px;
+                background: {p['panel2']};
+                border: 1px solid {p['border']};
+                border-radius: 13px;
+                padding: 3px 12px;
                 font-size: {fs_small}px;
             }}
-            QPushButton#primary {{ font-weight: 600; }}
+            QPushButton#engineToggle:hover {{
+                border-color: {p['accent']}; color: {p['accent']};
+            }}
         """)
+        for b in (self.btn_speak_source, self.btn_speak_trans, self.btn_star,
+                  self.btn_retry, self.btn_pin, self.btn_expand):
+            b.set_colors(p["text_dim"], p["accent"])
+        self.btn_copy.set_colors(p["accent_text"], p["accent_text"])
         # 主题/字号变化后按当前内容重排高度；空窗口回到基线（各展示路径会自行重设）
         if self.result_view.toPlainText().strip():
             self._fit_height()
@@ -392,22 +420,35 @@ class TranslatePopup(QWidget):
         self.result_view.setVisible(True)
 
     def _set_source_preview(self, source: str, prefix: str) -> None:
-        """折叠态原文预览：超上限截断并显示「全文」按钮。"""
+        """折叠态原文预览：超上限截断并显示「展开」图标钮。
+
+        prefix 行渲染为小一号 dim 字（"原文 · 取词：UIA"是元信息不是内容），
+        头部视觉重量让给译文。"""
         self._source_expanded = False
         self._source_prefix = prefix
         truncated = len(source) > SOURCE_PREVIEW_LIMIT
-        self.btn_expand.setText("全文")
+        self.btn_expand.set_icon("chevron-down")
+        self.btn_expand.setToolTip("查看全文")
         self.btn_expand.setVisible(truncated)
         text = source[:SOURCE_PREVIEW_LIMIT] + ("…" if truncated else "")
-        self.source_label.setPlainText(f"{prefix}\n{text}")
+        fs_tiny = max(self._fs - 4, 10)
+        self.source_label.setHtml(
+            f"<div style='font-size:{fs_tiny}px;color:{self._p['text_dim']};'>"
+            f"{html.escape(prefix)}</div>"
+            f"<div style='margin-top:1px;'>{html.escape(text)}</div>")
         self.source_label.setMaximumHeight(64)
 
     def _toggle_source_expand(self) -> None:
-        """「全文/收起」：展开后内部滚动，窗口随内容重排。"""
+        """展开/收起全文：展开后内部滚动，窗口随内容重排。"""
         self._source_expanded = not self._source_expanded
         if self._source_expanded:
-            self.btn_expand.setText("收起")
-            self.source_label.setPlainText(f"{self._source_prefix}\n{self._source}")
+            self.btn_expand.set_icon("chevron-up")
+            self.btn_expand.setToolTip("收起")
+            fs_tiny = max(self._fs - 4, 10)
+            self.source_label.setHtml(
+                f"<div style='font-size:{fs_tiny}px;color:{self._p['text_dim']};'>"
+                f"{html.escape(self._source_prefix)}</div>"
+                f"<div style='margin-top:1px;'>{html.escape(self._source)}</div>")
             self.source_label.setMaximumHeight(160)
         else:
             self._set_source_preview(self._source, self._source_prefix)
@@ -457,6 +498,7 @@ class TranslatePopup(QWidget):
         for b in (self.btn_speak_source, self.btn_speak_trans, self.btn_star,
                   self.btn_copy, self.btn_retry):
             b.setVisible(True)
+        self.btn_star.set_icon("star")  # 上一条译文的实心星残留复位
         # 译文未出：读译文/复制拿到空文本，收藏会写入无译文生词——译文到位后再启用
         for b in (self.btn_speak_trans, self.btn_star, self.btn_copy):
             b.setEnabled(False)
@@ -514,6 +556,7 @@ class TranslatePopup(QWidget):
                   self.btn_copy, self.btn_retry):
             b.setVisible(True)
             b.setEnabled(True)
+        self.btn_star.set_icon("star")  # 同 show_translation：实心星残留复位
 
         self._fit_height()
         self.show_animated()
@@ -696,14 +739,12 @@ class TranslatePopup(QWidget):
 
     def _on_tts_state(self, state: str) -> None:
         if self._speaking_btn is not None:
-            idle_text = self._speaking_btn.property("idle_text")
-            self._speaking_btn.setText(idle_text or "朗读")
+            self._speaking_btn.set_icon("volume-2")  # 回到基准色朗读图标
             self._speaking_btn = None
         if state == "playing" and self._pending_speak_btn is not None:
             btn = self._pending_speak_btn
             self._speaking_btn = btn
-            btn.setProperty("idle_text", btn.text())
-            btn.setText("停止")
+            btn.set_icon("stop", self._p["accent"])  # 朗读中：停止方块 + accent 醒目
         self._pending_speak_btn = None
 
     def _star(self) -> None:
@@ -714,6 +755,8 @@ class TranslatePopup(QWidget):
         try:
             database.upsert_word(word[:500], note=note, context="")
             self._flash_status("已加入生词本")
+            self.btn_star.set_icon("star-filled", self._p["accent"])
+            self.btn_star.bounce()
             self.btn_star.setEnabled(False)
         except Exception as e:
             self._set_status(f"收藏失败：{e}", error=True)
@@ -754,7 +797,12 @@ class TranslatePopup(QWidget):
 
     def _on_pin_toggled(self, on: bool) -> None:
         self._pinned = on
-        self.btn_pin.setText("已钉住" if on else "钉住")
+        if on:
+            self.btn_pin.set_icon("pin-filled", self._p["accent"])
+            self.btn_pin.setToolTip("已钉住：点击其他程序不再关闭")
+        else:
+            self.btn_pin.set_icon("pin")
+            self.btn_pin.setToolTip("钉住：弹窗不再因点击其他程序而关闭")
 
     # ---------------------------------------------------------------- 杂项
 

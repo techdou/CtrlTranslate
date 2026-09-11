@@ -190,7 +190,20 @@ def build_qss(p: dict) -> str:
     QListWidget::item {{ padding: 10px 14px; }}
     QListWidget::item:selected {{
         background: {p['panel']}; color: {p['accent']};
-        border-left: 3px solid {p['accent']};
+    }}
+    /* 设置页卡片分组：容器 panel 底 + 圆角；卡片内 label 透明，行容器用
+       #rowWrap 精确透明（"QFrame#card > QWidget" 会命中 QLineEdit 等输入控件
+       ——QSS 类选择器命中子类，且 id 特异性压过无 id 规则，教训记牢） */
+    QFrame#card {{
+        background: {p['panel']};
+        border: 1px solid {p['border']};
+        border-radius: {RADIUS['md']}px;
+    }}
+    QFrame#card QLabel {{ background: transparent; border: none; }}
+    QWidget#rowWrap {{ background: transparent; }}
+    QLabel#cardTitle {{
+        font-weight: 600; font-size: 14px;
+        padding-bottom: 2px;
     }}
     QTableWidget {{
         background: {p['panel']};
@@ -198,6 +211,7 @@ def build_qss(p: dict) -> str:
         gridline-color: {p['border']};
         selection-background-color: {p['panel2']};
     }}
+    QTableWidget::item:hover {{ background: {p['panel2']}; }}
     QHeaderView::section {{
         background: {p['panel2']};
         border: none;

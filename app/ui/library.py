@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
+    QLabel,
     QLineEdit,
     QMainWindow,
     QMessageBox,
@@ -25,6 +26,7 @@ from PySide6.QtWidgets import (
 
 from app.core import vocabulary
 from app.db import database
+from app.ui.icons import get_icon
 from app.ui.theme import build_qss, palette
 
 logger = logging.getLogger("ctrltrans.library")
@@ -53,6 +55,10 @@ class LibraryWindow(QMainWindow):
 
         self.ed_search = QLineEdit()
         self.ed_search.setPlaceholderText("搜索…（回车刷新）")
+        self.ed_search.setClearButtonEnabled(True)
+        self._search_action = self.ed_search.addAction(
+            get_icon("search", palette(theme)["text_dim"]),
+            QLineEdit.ActionPosition.LeadingPosition)
         self.ed_search.returnPressed.connect(self.refresh)
         self.cb_source = QComboBox()
         self.cb_source.addItem("全部来源", "")
@@ -99,7 +105,7 @@ class LibraryWindow(QMainWindow):
         table.setSelectionBehavior(QAbstractItemView.SelectRows)
         table.setWordWrap(False)  # 长文本截断入 tooltip，行高统一利于扫读
         table.verticalHeader().setVisible(False)
-        table.verticalHeader().setDefaultSectionSize(32)
+        table.verticalHeader().setDefaultSectionSize(40)  # 行高给呼吸感，扫读不挤
         header = table.horizontalHeader()
         header.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         header.setStretchLastSection(False)
@@ -113,7 +119,9 @@ class LibraryWindow(QMainWindow):
         self._apply_theme()
 
     def _apply_theme(self) -> None:
-        self.setStyleSheet(build_qss(palette(self.theme)))
+        p = palette(self.theme)
+        self.setStyleSheet(build_qss(p))
+        self._search_action.setIcon(get_icon("search", p["text_dim"]))
 
     # ---------------------------------------------------------------- 数据
 
@@ -167,15 +175,27 @@ class LibraryWindow(QMainWindow):
                 table._placeholder.deleteLater()
                 table._placeholder = None
             return
-        from PySide6.QtWidgets import QLabel
-
         p = palette(self.theme)
-        lbl = QLabel(text, table)
+        # 空态 = 大图标 + 指引文案的纵向容器（单个灰字太单薄），居中、不挡表格交互
+        box = QWidget(table)
+        box.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        box.setStyleSheet("background: transparent;")
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(10)
+        icon_name = "history" if table is self.tab_history else "book-open"
+        ic = QLabel()
+        ic.setPixmap(get_icon(icon_name, p["text_dim"], 36).pixmap(36, 36))
+        ic.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl = QLabel(text)
         lbl.setStyleSheet(f"color: {p['text_dim']}; font-size: 13px; background: transparent;")
-        lbl.adjustSize()  # 宽度按文案自适应，居中计算才准
-        _center_in_table(table, lbl)
-        lbl.setVisible(True)
-        table._placeholder = lbl
+        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(ic)
+        lay.addWidget(lbl)
+        box.adjustSize()  # 尺寸按内容自适应，居中计算才准
+        _center_in_table(table, box)
+        box.setVisible(True)
+        table._placeholder = box
 
     def eventFilter(self, obj, event) -> bool:
         # 窗口/表格尺寸变化后，空态占位重新居中（一次性 setGeometry 会跑偏）

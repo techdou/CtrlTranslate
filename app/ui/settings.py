@@ -1,19 +1,26 @@
-"""设置界面：左分类 + 右表单。保存后发 config_saved 信号（完整配置对象）。"""
+"""设置界面：左分类侧栏（图标 + 滑动指示条）+ 右侧卡片式分组表单。
+
+启用类总闸用 ToggleSwitch 滑动开关（接口对齐 QCheckBox，调用方无感）；
+保存后发 config_saved 信号（完整配置对象），按钮短暂停留「✓ 已保存」再关闭。
+"""
 
 from __future__ import annotations
 
 import copy
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
     QFormLayout,
+    QFrame,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QPlainTextEdit,
     QPushButton,
     QRadioButton,
@@ -26,7 +33,10 @@ from PySide6.QtWidgets import (
 )
 
 from app.config import PROVIDER_PRESETS
-from app.ui.theme import build_qss, palette
+from app.ui.icons import get_icon
+from app.ui.motion import animate
+from app.ui.theme import MOTION, build_qss, palette
+from app.ui.widgets import ToggleSwitch
 
 # edge-tts 常用音色（中英各留几个，够用不堆全表）
 VOICE_ZH = [
@@ -66,20 +76,22 @@ class SettingsDialog(QDialog):
         root = QHBoxLayout()  # 不带 parent，最后统一 setLayout
         self.pages = QStackedWidget()
 
+        p = palette(self.cfg["popup"]["theme"])
         self.nav = QListWidget()
-        for key, label in [
-            ("provider", "翻译服务"),
-            ("tts", "语音播报"),
-            ("trigger", "触发与取词"),
-            ("popup", "弹窗外观"),
-            ("prompts", "提示词模板"),
-            ("data", "历史与数据"),
-            ("backup", "数据备份"),
+        self._nav_icon_names: list[str] = []
+        for key, label, icon_name in [
+            ("provider", "翻译服务", "languages"),
+            ("tts", "语音播报", "volume-2"),
+            ("trigger", "触发与取词", "mouse-pointer-click"),
+            ("popup", "弹窗外观", "palette"),
+            ("prompts", "提示词模板", "file-text"),
+            ("data", "历史与数据", "database"),
+            ("backup", "数据备份", "cloud-upload"),
         ]:
-            self.nav.addItem(label)
-        self.nav.setCurrentRow(0)
-        self.nav.currentRowChanged.connect(self.pages.setCurrentIndex)
-        self.nav.setFixedWidth(150)
+            self.nav.addItem(QListWidgetItem(get_icon(icon_name, p["text_dim"]), label))
+            self._nav_icon_names.append(icon_name)
+        self.nav.setIconSize(QSize(16, 16))
+        self.nav.setFixedWidth(196)
 
         self.pages.addWidget(self._page_provider())
         self.pages.addWidget(self._page_tts())
@@ -92,36 +104,132 @@ class SettingsDialog(QDialog):
         root.addWidget(self.nav)
         root.addWidget(self.pages, 1)
 
+        # 侧栏选中指示条：3px accent 竖条浮在视口上，切换时滑动过去（替代旧的
+        # 静态左边框）。WA_TransparentForMouseEvents 不挡点击
+        self._nav_indicator = QFrame(self.nav.viewport())
+        self._nav_indicator.setFixedSize(3, 18)
+        self._nav_indicator.setStyleSheet(f"background: {p['accent']}; border-radius: 1px;")
+        self._nav_indicator.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._nav_indicator.show()
+        self._nav_indicator.raise_()
+        self._nav_anim = None
+        self._page_fade = None
+        self._faded_page = None
+
+        self.nav.setCurrentRow(0)
+        self.nav.currentRowChanged.connect(self._on_nav_changed)
+        self.pages.currentChanged.connect(self._fade_in_page)
+
         btns = QHBoxLayout()
-        btn_save = QPushButton("保存")
-        btn_save.setObjectName("primary")
-        btn_save.clicked.connect(self._save)
+        self.btn_save = QPushButton("保存")
+        self.btn_save.setObjectName("primary")
+        self.btn_save.clicked.connect(self._save)
         btn_cancel = QPushButton("取消")
         btn_cancel.clicked.connect(self.reject)
         btns.addStretch(1)
         btns.addWidget(btn_cancel)
-        btns.addWidget(btn_save)
+        btns.addWidget(self.btn_save)
 
         wrap = QVBoxLayout()
         wrap.addLayout(root, 1)
         wrap.addLayout(btns)
         self.setLayout(wrap)
 
-    def _page(self, title: str) -> tuple[QFormLayout, QWidget]:
+    def _page(self, title: str) -> tuple[QVBoxLayout, QWidget]:
+        """页骨架：页标题 + 纵向卡片容器（各页往 vbox 里加 _card）。"""
         page = QWidget()
-        form = QFormLayout(page)
-        form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        form.setSpacing(10)
+        v = QVBoxLayout(page)
+        v.setContentsMargins(18, 14, 18, 14)
+        v.setSpacing(12)
         head = QLabel(title)
         head.setObjectName("sectionTitle")
-        form.addRow(head)
-        return form, page
+        v.addWidget(head)
+        return v, page
+
+    def _card(self, v: QVBoxLayout, title: str | None = None) -> QFormLayout:
+        """圆角卡片容器：可选组标题 + 表单。组间靠卡片与留白分隔，不再平铺到底。"""
+        card = QFrame()
+        card.setObjectName("card")
+        cv = QVBoxLayout(card)
+        cv.setContentsMargins(16, 12, 16, 14)
+        cv.setSpacing(8)
+        if title:
+            t = QLabel(title)
+            t.setObjectName("cardTitle")
+            cv.addWidget(t)
+        form = QFormLayout()
+        form.setSpacing(10)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        cv.addLayout(form)
+        v.addWidget(card)
+        return form
+
+    def _mk_toggle(self, checked: bool) -> ToggleSwitch:
+        """启用类总闸的统一形态；颜色随当前主题（保存换主题后重开对话框生效）。"""
+        p = palette(self.cfg["popup"]["theme"])
+        return ToggleSwitch(checked, accent=p["accent"], track_off=p["border"])
+
+    # ---- 侧栏与页面切换的微动效 ----
+
+    def _on_nav_changed(self, row: int) -> None:
+        self.pages.setCurrentIndex(row)
+        p = palette(self.cfg["popup"]["theme"])
+        for i, name in enumerate(self._nav_icon_names):  # 选中项图标点亮 accent
+            color = p["accent"] if i == row else p["text_dim"]
+            self.nav.item(i).setIcon(get_icon(name, color))
+        self._move_nav_indicator(row, animate_it=True)
+
+    def _move_nav_indicator(self, row: int, animate_it: bool) -> None:
+        item = self.nav.item(row)
+        if item is None:
+            return
+        rect = self.nav.visualItemRect(item)
+        if not rect.isValid():  # 布局未完成（构造期）时由 showEvent 补定位
+            return
+        y = rect.center().y() - self._nav_indicator.height() // 2
+        if not animate_it:
+            self._nav_indicator.move(0, y)
+            return
+        if self._nav_anim is not None:
+            self._nav_anim.stop()
+        self._nav_anim = animate(
+            lambda v: self._nav_indicator.move(0, round(v)),
+            float(self._nav_indicator.y()), float(y),
+            MOTION["dur_micro"], MOTION["ease_std"])
+
+    def _fade_in_page(self, index: int) -> None:
+        """页面切换淡入；播完即卸 effect（离屏渲染路径常驻会让后续滚动发糊）。"""
+        w = self.pages.widget(index)
+        if w is None:
+            return
+        if self._page_fade is not None:
+            self._page_fade.stop()  # stop 不触发 finished，旧页的清理在这里兜
+            self._page_fade = None
+            if self._faded_page is not None and self._faded_page is not w:
+                self._faded_page.setGraphicsEffect(None)
+                self._faded_page = None
+        eff = QGraphicsOpacityEffect(w)
+        w.setGraphicsEffect(eff)
+        self._faded_page = w
+
+        def _cleanup() -> None:
+            if self._faded_page is w:
+                w.setGraphicsEffect(None)
+                self._faded_page = None
+
+        self._page_fade = animate(eff.setOpacity, 0.0, 1.0,
+                                  MOTION["dur_in"], "OutQuad", done=_cleanup)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        # 布局完成后补指示条初始定位（构造期 visualItemRect 还没算出有效矩形）
+        QTimer.singleShot(0, lambda: self._move_nav_indicator(self.nav.currentRow(), False))
 
     # ---------------------------------------------------------------- 各页
 
     def _page_provider(self) -> QWidget:
         p = self.cfg["provider"]
-        form, page = self._page("翻译服务（OpenAI 兼容）")
+        vbox, page = self._page("翻译服务")
 
         self.cb_preset = QComboBox()
         for key, preset in PROVIDER_PRESETS.items():
@@ -220,11 +328,7 @@ class SettingsDialog(QDialog):
 
         lbl_fb_hint = QLabel("主服务失败（网络 / 限流 / Key 失效）时自动用备用服务重试；三项填写完整后启用")
         lbl_fb_hint.setObjectName("dim")
-        fb_head = QLabel("备用服务（可选）")
-        fb_head.setObjectName("sectionTitle")
 
-        net_head = QLabel("网络")
-        net_head.setObjectName("sectionTitle")
         self.sp_timeout = QSpinBox()
         self.sp_timeout.setRange(10, 300)
         self.sp_timeout.setSuffix(" 秒")
@@ -236,53 +340,54 @@ class SettingsDialog(QDialog):
         lbl_proxy_hint = QLabel("翻译与语音合成出站请求共用；仅支持 http(s) 代理地址")
         lbl_proxy_hint.setObjectName("dim")
 
-        form.addRow("服务商预设", self.cb_preset)
-        form.addRow("API 地址", self.ed_base_url)
-        form.addRow("模型", self.cb_model)
-        form.addRow("API Key", _wrap_h(key_row))
-        form.addRow("", _wrap_h(test_row))
-        form.addRow("翻译模式", self.rb_study)
-        form.addRow("", self.rb_concise)
-        form.addRow("", lbl_mode_hint)
-        form.addRow("自定义 Prompt", self.ed_prompt)
-        form.addRow(fb_head)
-        form.addRow("预设（填表模板）", self.cb_fb_preset)
-        form.addRow("备用 API 地址", self.ed_fb_url)
-        form.addRow("备用模型", self.cb_fb_model)
-        form.addRow("备用 API Key", _wrap_h(fb_key_row))
-        form.addRow("", _wrap_h(fb_test_row))
-        form.addRow("", lbl_fb_hint)
-        form.addRow(net_head)
-        form.addRow("请求超时", self.sp_timeout)
-        form.addRow("", lbl_timeout_hint)
-        form.addRow("代理地址", self.ed_proxy)
-        form.addRow("", lbl_proxy_hint)
+        main_card = self._card(vbox, "主服务（OpenAI 兼容）")
+        main_card.addRow("服务商预设", self.cb_preset)
+        main_card.addRow("API 地址", self.ed_base_url)
+        main_card.addRow("模型", self.cb_model)
+        main_card.addRow("API Key", _wrap_h(key_row))
+        main_card.addRow("", _wrap_h(test_row))
+        main_card.addRow("翻译模式", self.rb_study)
+        main_card.addRow("", self.rb_concise)
+        main_card.addRow("", lbl_mode_hint)
+        main_card.addRow("自定义 Prompt", self.ed_prompt)
+
+        fb_card = self._card(vbox, "备用服务（可选）")
+        fb_card.addRow("预设（填表模板）", self.cb_fb_preset)
+        fb_card.addRow("备用 API 地址", self.ed_fb_url)
+        fb_card.addRow("备用模型", self.cb_fb_model)
+        fb_card.addRow("备用 API Key", _wrap_h(fb_key_row))
+        fb_card.addRow("", _wrap_h(fb_test_row))
+        fb_card.addRow("", lbl_fb_hint)
+
+        net_card = self._card(vbox, "网络")
+        net_card.addRow("请求超时", self.sp_timeout)
+        net_card.addRow("", lbl_timeout_hint)
+        net_card.addRow("代理地址", self.ed_proxy)
+        net_card.addRow("", lbl_proxy_hint)
 
         # ---- 网页版引擎（免费额度）：与"用哪个引擎翻译"同页，语义对齐 ----
         webai = self.cfg.get("webai", {})
-        webai_head = QLabel("网页版引擎（免费额度）")
-        webai_head.setObjectName("sectionTitle")
-        self.ck_webai = QCheckBox("启用（划词/截图改走内嵌网页版 DeepSeek，无需 API Key）")
-        self.ck_webai.setChecked(webai.get("enabled", False))
+        self.ck_webai = self._mk_toggle(webai.get("enabled", False))
         self.ck_auto_terms = QCheckBox("自动把【术语】段收录进生词本（网页引擎回复 + 术语解释模式）")
         self.ck_auto_terms.setChecked(webai.get("auto_terms", True))
-        lbl_webai_hint = QLabel("首次使用会弹出网页窗口，登录 DeepSeek 一次即可长期有效；"
-                                "速度取决于网页服务。与 API 模式二选一，重试按钮跟随各自引擎。")
+        lbl_webai_hint = QLabel("划词/截图改走内嵌网页版 DeepSeek，无需 API Key；"
+                                "首次使用会弹出网页窗口，登录一次长期有效，速度取决于网页服务。"
+                                "与 API 模式二选一，重试按钮跟随各自引擎。")
         lbl_webai_hint.setObjectName("dim")
         lbl_webai_hint.setWordWrap(True)
-        form.addRow(webai_head)
-        form.addRow("", self.ck_webai)
-        form.addRow("", self.ck_auto_terms)
-        form.addRow("", lbl_webai_hint)
+        web_card = self._card(vbox, "网页版引擎（免费额度）")
+        web_card.addRow("启用", self.ck_webai)
+        web_card.addRow("", self.ck_auto_terms)
+        web_card.addRow("", lbl_webai_hint)
+        vbox.addStretch(1)
         return _scroll(page)
 
     def _page_tts(self) -> QWidget:
         t = self.cfg["tts"]
         c = t.get("custom", {})
-        form, page = self._page("语音播报（TTS）")
+        vbox, page = self._page("语音播报（TTS）")
 
-        self.ck_tts = QCheckBox("启用语音播报")
-        self.ck_tts.setChecked(t.get("enabled", True))
+        self.ck_tts = self._mk_toggle(t.get("enabled", True))
 
         self.cb_engine = QComboBox()
         self.cb_engine.addItem("自动（在线优先，失败转系统语音）", "auto")
@@ -337,34 +442,40 @@ class SettingsDialog(QDialog):
         _select_combo(self.cb_autoplay_what, t.get("auto_play_what", "source"))
         self.ck_tts.toggled.connect(self._sync_tts_enabled)
         self.cb_engine.currentIndexChanged.connect(
-            lambda _i: self._sync_engine_fields(form))
+            lambda _i: self._sync_engine_fields())
         for w in (self.cb_engine, self.cb_voice_zh, self.cb_voice_en, self.cb_rate, self.cb_volume,
                   self.ed_tts_url, self.ed_tts_model, self.ed_tts_voice, self.ed_tts_key,
                   self.btn_tts_eye, self.ck_autoplay, self.cb_autoplay_what):
             w.setEnabled(self.ck_tts.isChecked())
 
-        form.addRow("", self.ck_tts)
-        form.addRow("合成引擎", self.cb_engine)
-        form.addRow("中文音色（读译文）", self.cb_voice_zh)
-        form.addRow("英文音色（读原文）", self.cb_voice_en)
-        form.addRow("TTS API 地址", self.ed_tts_url)
-        form.addRow("TTS 模型", self.ed_tts_model)
-        form.addRow("TTS 音色", self.ed_tts_voice)
-        form.addRow("TTS API Key", _wrap_h(tts_key_row))
-        form.addRow("语速", self.cb_rate)
-        form.addRow("音量", self.cb_volume)
-        form.addRow("", self.ck_autoplay)
-        form.addRow("自动播报内容", self.cb_autoplay_what)
-        self._sync_engine_fields(form)  # 按当前引擎初始化显隐
+        self._form_tts_main = self._card(vbox, "播报设置")
+        self._form_tts_main.addRow("启用", self.ck_tts)
+        self._form_tts_main.addRow("合成引擎", self.cb_engine)
+        self._form_tts_main.addRow("中文音色（读译文）", self.cb_voice_zh)
+        self._form_tts_main.addRow("英文音色（读原文）", self.cb_voice_en)
+        self._form_tts_main.addRow("语速", self.cb_rate)
+        self._form_tts_main.addRow("音量", self.cb_volume)
+        self._form_tts_main.addRow("", self.ck_autoplay)
+        self._form_tts_main.addRow("自动播报内容", self.cb_autoplay_what)
+
+        # 自定义引擎的四个字段独立成卡：整卡显隐比逐行显隐更整，少一列对齐噪音
+        form_custom = self._card(vbox, "自定义 TTS（OpenAI 兼容）")
+        form_custom.addRow("TTS API 地址", self.ed_tts_url)
+        form_custom.addRow("TTS 模型", self.ed_tts_model)
+        form_custom.addRow("TTS 音色", self.ed_tts_voice)
+        form_custom.addRow("TTS API Key", _wrap_h(tts_key_row))
+        self._card_tts_custom = form_custom.parentWidget()
+
+        vbox.addStretch(1)
+        self._sync_engine_fields()  # 按当前引擎初始化显隐
         return _scroll(page)
 
-    def _sync_engine_fields(self, form: QFormLayout) -> None:
-        """custom 引擎显示地址/模型/音色/Key，隐藏 edge 音色；其余引擎反之。"""
+    def _sync_engine_fields(self) -> None:
+        """custom 引擎显示自定义卡、隐藏 edge 音色行；其余引擎反之。"""
         custom = self.cb_engine.currentData() == "custom"
-        for w in (self.ed_tts_url, self.ed_tts_model, self.ed_tts_voice, self.ed_tts_key):
-            form.setRowVisible(w, custom)
+        self._card_tts_custom.setVisible(custom)
         for w in (self.cb_voice_zh, self.cb_voice_en):
-            form.setRowVisible(w, not custom)
+            self._form_tts_main.setRowVisible(w, not custom)
 
     def _sync_tts_enabled(self) -> None:
         on = self.ck_tts.isChecked()
@@ -375,10 +486,9 @@ class SettingsDialog(QDialog):
 
     def _page_trigger(self) -> QWidget:
         tr, cap = self.cfg["trigger"], self.cfg["capture"]
-        form, page = self._page("触发与取词")
+        vbox, page = self._page("触发与取词")
 
-        self.ck_hotkey = QCheckBox("启用双击划词翻译")
-        self.ck_hotkey.setChecked(tr.get("enabled", True))
+        self.ck_hotkey = self._mk_toggle(tr.get("enabled", True))
 
         self.cb_key = QComboBox()
         self.cb_key.addItem("双击 Ctrl", "ctrl")
@@ -392,8 +502,7 @@ class SettingsDialog(QDialog):
         self.lbl_interval = QLabel(f"{self.sl_interval.value()} ms")
         self.sl_interval.valueChanged.connect(lambda v: self.lbl_interval.setText(f"{v} ms"))
 
-        self.ck_uia = QCheckBox("优先用 UIA 直接读取选中（不动剪贴板；失败自动改用复制法）")
-        self.ck_uia.setChecked(cap.get("prefer_uia", True))
+        self.ck_uia = self._mk_toggle(cap.get("prefer_uia", True))
 
         self.sp_clip_wait = QSpinBox()
         self.sp_clip_wait.setRange(100, 1500)
@@ -408,11 +517,8 @@ class SettingsDialog(QDialog):
 
         # ---- 屏幕截图翻译（OCR） ----
         ocr = self.cfg.get("ocr", {})
-        ocr_head = QLabel("屏幕截图翻译（OCR）")
-        ocr_head.setObjectName("sectionTitle")
 
-        self.ck_ocr = QCheckBox("启用（托盘菜单 + 热键框选屏幕区域，识别并翻译图内文字）")
-        self.ck_ocr.setChecked(ocr.get("enabled", True))
+        self.ck_ocr = self._mk_toggle(ocr.get("enabled", True))
 
         self.cb_ocr_model = QComboBox()
         self.cb_ocr_model.setEditable(True)
@@ -427,37 +533,47 @@ class SettingsDialog(QDialog):
 
         # ---- 术语解释 ----
         term = self.cfg.get("term", {})
-        term_head = QLabel("术语解释")
-        term_head.setObjectName("sectionTitle")
-        self.ck_term = QCheckBox("启用（划词后按热键向引擎提问术语含义；未划到词自动转为框选截图）")
-        self.ck_term.setChecked(term.get("enabled", True))
+        self.ck_term = self._mk_toggle(term.get("enabled", True))
         self.ed_term_hotkey = QLineEdit(term.get("hotkey", "alt+e"))
         self.ed_term_hotkey.setPlaceholderText("如 alt+e；留空 = 禁用热键（仍可从托盘菜单触发截图解释）")
-        lbl_term_hint = QLabel("回答第一行是一句话通俗定义，连同关联术语自动进生词本"
+        lbl_term_hint = QLabel("划词后按热键向引擎提问术语含义；未划到词自动转为框选截图。"
+                               "回答第一行是一句话通俗定义，连同关联术语自动进生词本"
                                "（受翻译服务页「自动收录」开关控制）。提示词可在「提示词模板」页自定义。")
         lbl_term_hint.setObjectName("dim")
         lbl_term_hint.setWordWrap(True)
 
-        form.addRow("", self.ck_hotkey)
-        form.addRow("触发键", self.cb_key)
-        form.addRow("双击判定间隔", _hbox(self.sl_interval, self.lbl_interval))
-        form.addRow("", self.ck_uia)
-        form.addRow("复制法等待上限", self.sp_clip_wait)
-        form.addRow("单次翻译长度上限（字符）", self.sp_max_chars)
-        form.addRow(ocr_head)
-        form.addRow("", self.ck_ocr)
-        form.addRow("识别模型", self.cb_ocr_model)
-        form.addRow("截图热键", self.ed_ocr_hotkey)
-        form.addRow("", lbl_ocr_hint)
-        form.addRow(term_head)
-        form.addRow("", self.ck_term)
-        form.addRow("术语解释热键", self.ed_term_hotkey)
-        form.addRow("", lbl_term_hint)
+        sel_card = self._card(vbox, "划词翻译")
+        sel_card.addRow("启用", self.ck_hotkey)
+        sel_card.addRow("触发键", self.cb_key)
+        sel_card.addRow("双击判定间隔", _hbox(self.sl_interval, self.lbl_interval))
+
+        cap_card = self._card(vbox, "取词方式")
+        cap_card.addRow("UIA 优先", self.ck_uia)
+        lbl_uia_hint = QLabel("直接读取选中，不动剪贴板；失败自动改用复制法")
+        lbl_uia_hint.setObjectName("dim")
+        cap_card.addRow("", lbl_uia_hint)
+        cap_card.addRow("复制法等待上限", self.sp_clip_wait)
+        cap_card.addRow("单次翻译长度上限（字符）", self.sp_max_chars)
+
+        ocr_card = self._card(vbox, "屏幕截图翻译（OCR）")
+        ocr_card.addRow("启用", self.ck_ocr)
+        lbl_ocr_enable_hint = QLabel("托盘菜单 + 热键框选屏幕区域，识别并翻译图内文字")
+        lbl_ocr_enable_hint.setObjectName("dim")
+        ocr_card.addRow("", lbl_ocr_enable_hint)
+        ocr_card.addRow("识别模型", self.cb_ocr_model)
+        ocr_card.addRow("截图热键", self.ed_ocr_hotkey)
+        ocr_card.addRow("", lbl_ocr_hint)
+
+        term_card = self._card(vbox, "术语解释")
+        term_card.addRow("启用", self.ck_term)
+        term_card.addRow("术语解释热键", self.ed_term_hotkey)
+        term_card.addRow("", lbl_term_hint)
+        vbox.addStretch(1)
         return _scroll(page)
 
     def _page_popup(self) -> QWidget:
         po = self.cfg["popup"]
-        form, page = self._page("弹窗外观")
+        vbox, page = self._page("弹窗外观")
 
         self.cb_theme = QComboBox()
         self.cb_theme.addItem("深色", "dark")
@@ -485,11 +601,13 @@ class SettingsDialog(QDialog):
         self.sp_autoclose.setSuffix(" 秒")
         self.sp_autoclose.setValue(po.get("auto_close_s", 0))
 
-        form.addRow("主题", self.cb_theme)
-        form.addRow("正文字号", self.sp_font)
-        form.addRow("不透明度", _hbox(self.sl_opacity, self.lbl_opacity))
-        form.addRow("弹窗宽度", self.sp_width)
-        form.addRow("自动关闭", self.sp_autoclose)
+        card = self._card(vbox)
+        card.addRow("主题", self.cb_theme)
+        card.addRow("正文字号", self.sp_font)
+        card.addRow("不透明度", _hbox(self.sl_opacity, self.lbl_opacity))
+        card.addRow("弹窗宽度", self.sp_width)
+        card.addRow("自动关闭", self.sp_autoclose)
+        vbox.addStretch(1)
         return _scroll(page)
 
     def _page_prompts(self) -> QWidget:
@@ -499,13 +617,16 @@ class SettingsDialog(QDialog):
         API 模式的划词/截图翻译自定义走翻译服务页的自定义 Prompt（system 覆盖，
         语义不同故不合并——模板是 user 指令，custom_prompt 是 system）。"""
         pr = self.cfg.setdefault("prompts", {})
-        form, page = self._page("提示词模板")
+        vbox, page = self._page("提示词模板")
 
         lbl_hint = QLabel("留空 = 用内置默认模板；{text} 代表划词原文/识别出的文字。"
                           "以下模板作用于：网页版引擎的全部请求 + 术语解释模式（两引擎通用）。"
                           "API 模式的划词/截图翻译自定义在「翻译服务 → 自定义 Prompt」。")
         lbl_hint.setObjectName("dim")
         lbl_hint.setWordWrap(True)
+
+        self._prompt_edits: dict[str, QPlainTextEdit] = {}
+        form = self._card(vbox)
 
         def _tpl(key: str, title: str, placeholder: str) -> None:
             ed = QPlainTextEdit(pr.get(key, ""))
@@ -514,7 +635,6 @@ class SettingsDialog(QDialog):
             self._prompt_edits[key] = ed
             form.addRow(title, ed)
 
-        self._prompt_edits: dict[str, QPlainTextEdit] = {}
         form.addRow("", lbl_hint)
         _tpl("translate_study", "划词翻译 · 学习（网页）",
              "内置：请将下面的文字翻译成中文…含专业术语时在译文后另起「【术语】」段…{text}")
@@ -528,14 +648,14 @@ class SettingsDialog(QDialog):
              "内置：请解释计算机科研领域的专业术语「{text}」…第一行一句话通俗定义…")
         _tpl("ocr_term", "术语解释 · 截图",
              "内置：识别图片中的专业术语并逐条通俗解释…最后汇总「【术语】」段…")
+        vbox.addStretch(1)
         return _scroll(page)
 
     def _page_data(self) -> QWidget:
         g = self.cfg["general"]
-        form, page = self._page("历史与数据")
+        vbox, page = self._page("历史与数据")
 
-        self.ck_history = QCheckBox("保存翻译历史（生词本不受影响）")
-        self.ck_history.setChecked(g.get("history_enabled", True))
+        self.ck_history = self._mk_toggle(g.get("history_enabled", True))
 
         self.btn_open_dir = QPushButton("打开数据目录")
         self.btn_open_dir.clicked.connect(self._open_data_dir)
@@ -546,10 +666,15 @@ class SettingsDialog(QDialog):
         self.lbl_paths = QLabel("配置、数据库与日志均存于 ~/.ctrltrans/")
         self.lbl_paths.setObjectName("dim")
 
-        form.addRow("", self.ck_history)
-        form.addRow("数据位置", self.btn_open_dir)
-        form.addRow("翻译缓存", self.btn_clear_cache)
-        form.addRow("", self.lbl_paths)
+        card = self._card(vbox)
+        card.addRow("保存历史", self.ck_history)
+        lbl_history_hint = QLabel("关闭后划词翻译不再入库；生词本不受影响")
+        lbl_history_hint.setObjectName("dim")
+        card.addRow("", lbl_history_hint)
+        card.addRow("数据位置", self.btn_open_dir)
+        card.addRow("翻译缓存", self.btn_clear_cache)
+        card.addRow("", self.lbl_paths)
+        vbox.addStretch(1)
         return _scroll(page)
 
     def _clear_cache(self) -> None:
@@ -563,7 +688,7 @@ class SettingsDialog(QDialog):
 
     def _page_backup(self) -> QWidget:
         w = self.cfg.get("webdav", {})
-        form, page = self._page("数据备份（WebDAV）")
+        vbox, page = self._page("数据备份（WebDAV）")
 
         self.ed_wd_url = QLineEdit(w.get("url", ""))
         self.ed_wd_url.setPlaceholderText("如 https://dav.jianguoyun.com/dav/（坚果云）")
@@ -615,14 +740,16 @@ class SettingsDialog(QDialog):
         lbl_wd_hint.setObjectName("dim")
         lbl_wd_hint.setWordWrap(True)
 
-        form.addRow("服务器地址", self.ed_wd_url)
-        form.addRow("账号", self.ed_wd_user)
-        form.addRow("密码（应用密码）", _wrap_h(wd_pw_row))
-        form.addRow("远端目录", self.ed_wd_dir)
-        form.addRow("", _wrap_h(wd_test_row))
-        form.addRow("", _wrap_h(wd_backup_row))
-        form.addRow("恢复", self.btn_wd_restore)
-        form.addRow("", lbl_wd_hint)
+        card = self._card(vbox)
+        card.addRow("服务器地址", self.ed_wd_url)
+        card.addRow("账号", self.ed_wd_user)
+        card.addRow("密码（应用密码）", _wrap_h(wd_pw_row))
+        card.addRow("远端目录", self.ed_wd_dir)
+        card.addRow("", _wrap_h(wd_test_row))
+        card.addRow("", _wrap_h(wd_backup_row))
+        card.addRow("恢复", self.btn_wd_restore)
+        card.addRow("", lbl_wd_hint)
+        vbox.addStretch(1)
         return _scroll(page)
 
     def _wcfg_from_form(self) -> tuple[str, str, str, str]:
@@ -862,7 +989,10 @@ class SettingsDialog(QDialog):
     def _save(self) -> None:
         cfg = self._collect_into(self.cfg)
         self.config_saved.emit(copy.deepcopy(cfg))
-        self.accept()
+        # 短暂停留「已保存」再关闭：保存成功的确定性反馈，不靠对话框瞬消失去猜
+        self.btn_save.setText("✓ 已保存")
+        self.btn_save.setEnabled(False)
+        QTimer.singleShot(300, self.accept)
 
     def _apply_theme(self) -> None:
         self.setStyleSheet(build_qss(palette(self.cfg["popup"]["theme"])))
@@ -872,6 +1002,7 @@ class SettingsDialog(QDialog):
 
 def _wrap_h(layout: QHBoxLayout) -> QWidget:
     w = QWidget()
+    w.setObjectName("rowWrap")  # 卡片内行容器透明走 QSS #rowWrap（后代选择器会误伤输入控件）
     layout.setContentsMargins(0, 0, 0, 0)
     w.setLayout(layout)
     return w
