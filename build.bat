@@ -10,8 +10,7 @@ if not exist .venv\Scripts\pyinstaller.exe (
 )
 
 echo [build] cleaning old output...
-if exist build rmdir /s /q build
-if exist dist  rmdir /s /q dist
+if exist dist\CtrlTranslate.exe del dist\CtrlTranslate.exe
 
 echo [build] building CtrlTranslate.exe (light, no WebEngine) ...
 .venv\Scripts\pyinstaller ^
