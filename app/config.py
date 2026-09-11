@@ -96,6 +96,21 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "key": "ctrl",              # 双击触发键：ctrl / alt / shift
         "interval_ms": 300,         # 双击判定窗口
     },
+    "term": {
+        "enabled": True,
+        "hotkey": "alt+e",          # 术语解释热键（划词后触发向引擎提问）；留空 = 禁用
+    },
+    "prompts": {
+        # 模板留空 = 用 main 内置默认；{text} = 原文占位符。
+        # 作用域：网页引擎全部 payload + 术语解释模式（两引擎）；
+        # API 模式的划词/截图翻译自定义走 translate.custom_prompt（见翻译服务页）
+        "translate_study": "",
+        "translate_concise": "",
+        "ocr_study": "",
+        "ocr_concise": "",
+        "ocr_term": "",
+        "term": "",
+    },
     "capture": {
         "prefer_uia": True,         # False = 直接走剪贴板模拟
         "clipboard_wait_ms": 400,
@@ -108,6 +123,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "webai": {
         "enabled": False,           # 网页版引擎（免费额度）：启用后划词/截图改走内嵌网页
         "site": "deepseek",         # 站点；当前仅 deepseek
+        "auto_terms": True,         # 自动把【术语】段/术语解释收录进生词本（总开关）
     },
     "tts": {
         "enabled": True,

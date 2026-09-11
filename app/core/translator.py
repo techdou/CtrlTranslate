@@ -105,17 +105,22 @@ class Translator(QObject):
 
     # ---------------------------------------------------------------- API
 
-    def translate(self, text: str, use_cache: bool = True) -> int:
-        """发起翻译，返回任务号。旧任务会被作废。use_cache=False 强制重译（重试入口）。"""
+    def translate(self, text: str, use_cache: bool = True, raw: bool = False) -> int:
+        """发起翻译，返回任务号。旧任务会被作废。use_cache=False 强制重译（重试入口）。
+        raw=True 时 text 是完整指令 prompt（术语解释等），不套翻译 system。"""
         with self._lock:
             self._task += 1
             task_id = self._task
-        threading.Thread(target=self._run, args=(text, task_id, use_cache), daemon=True).start()
+        threading.Thread(target=self._run, args=(text, task_id, use_cache, raw), daemon=True).start()
         return task_id
 
-    def translate_image(self, image_b64: str) -> int:
+    def translate_image(self, image_b64: str, followup_prompt: str | None = None) -> int:
         """OCR 截图翻译（两阶段）：视觉模型只做识别，识别文本再走普通文本
         翻译链（study/concise prompt、术语段、缓存、备用服务全复用）。
+
+        followup_prompt 非空时第二阶段改发该模板（.format(text=识别文本)，
+        raw 模式不套翻译 system）——截图术语解释用：识别出术语后交给
+        术语解释链而非翻译链。
 
         两阶段的根因：glm-4v-flash 这类 OCR 专精模型指令遵循弱，"识别并翻译"
         一步到位经常只回识别文本不翻译（真机实测）；识别交给它擅长的，翻译交回
@@ -125,7 +130,8 @@ class Translator(QObject):
         with self._lock:
             self._task += 1
             task_id = self._task
-        threading.Thread(target=self._run_image, args=(image_b64, task_id), daemon=True).start()
+        threading.Thread(target=self._run_image,
+                         args=(image_b64, task_id, followup_prompt), daemon=True).start()
         return task_id
 
     def cancel_all(self) -> None:
@@ -187,19 +193,21 @@ class Translator(QObject):
             raise _TaskCancelled
         return "".join(parts)
 
-    def _run(self, text: str, task_id: int, use_cache: bool = True) -> None:
+    def _run(self, text: str, task_id: int, use_cache: bool = True, raw: bool = False) -> None:
         try:
-            self._run_inner(text, task_id, use_cache)
+            self._run_inner(text, task_id, use_cache, raw)
         except _TaskCancelled:
             pass  # 被新请求作废，静默丢弃
 
-    def _run_image(self, image_b64: str, task_id: int) -> None:
+    def _run_image(self, image_b64: str, task_id: int,
+                   followup_prompt: str | None = None) -> None:
         try:
-            self._run_image_inner(image_b64, task_id)
+            self._run_image_inner(image_b64, task_id, followup_prompt)
         except _TaskCancelled:
             pass
 
-    def _run_inner(self, text: str, task_id: int, use_cache: bool = True) -> None:
+    def _run_inner(self, text: str, task_id: int, use_cache: bool = True,
+                   raw: bool = False) -> None:
         try:
             from openai import OpenAI  # noqa: F401 —— 与 _make_client 保持同一入口报缺库
         except ImportError:
@@ -223,7 +231,9 @@ class Translator(QObject):
                 return
 
         timeout = float(cfg.get("translate", {}).get("timeout_s", 60))
-        messages = build_messages(cfg, text)
+        # raw=True：text 本身是完整指令（术语解释模板），不套翻译 system
+        messages = ([{"role": "user", "content": text}] if raw
+                    else build_messages(cfg, text))
         proxy = get_proxy(cfg)
 
         try:
@@ -254,7 +264,8 @@ class Translator(QObject):
         self._cache_put(cfg, text, result)
         self.finished.emit(result, task_id)
 
-    def _run_image_inner(self, image_b64: str, task_id: int) -> None:
+    def _run_image_inner(self, image_b64: str, task_id: int,
+                         followup_prompt: str | None = None) -> None:
         try:
             from openai import OpenAI  # noqa: F401 —— 与 _make_client 保持同一入口报缺库
         except ImportError:
@@ -288,8 +299,13 @@ class Translator(QObject):
             return
         self.ocr_text_ready.emit(ocr_text, task_id)
 
-        # 阶段二：识别文本走普通文本翻译链（含缓存与备用服务 fallback）
-        self._run_inner(ocr_text, task_id, use_cache=True)
+        # 阶段二：默认走文本翻译链；给了 followup_prompt 则走 raw 指令链
+        # （截图术语解释：识别文本填进术语解释模板）
+        if followup_prompt:
+            self._run_inner(followup_prompt.format(text=ocr_text),
+                            task_id, use_cache=True, raw=True)
+        else:
+            self._run_inner(ocr_text, task_id, use_cache=True)
 
     def _test_run(self, on_ok, on_fail, endpoint: tuple[str, str, str] | None) -> None:
         base_url = ""

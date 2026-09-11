@@ -27,6 +27,7 @@ class TrayController(QObject):
     webai_new_session = Signal()        # 网页会话开新主题（清上下文）
     webai_upload_requested = Signal()   # 上传文档到网页会话（上下文附件）
     webai_engine_changed = Signal(bool) # 勾选切换 API/网页引擎（网页模式无弹窗后的切换入口）
+    term_ocr_requested = Signal()       # 术语截图解释：框选屏幕区域 → 识别 → 解释
 
     def __init__(self, icon: QIcon, enabled: bool = True, key: str = "ctrl",
                  parent: QObject | None = None):
@@ -51,6 +52,8 @@ class TrayController(QObject):
         act_library.triggered.connect(self.library_requested.emit)
         self.act_ocr = QAction("屏幕截图翻译…", menu)
         self.act_ocr.triggered.connect(self.ocr_requested.emit)
+        self.act_term_ocr = QAction("术语截图解释…", menu)
+        self.act_term_ocr.triggered.connect(self.term_ocr_requested.emit)
         act_update = QAction("检查更新…", menu)
         act_update.triggered.connect(self.check_update_requested.emit)
         act_about = QAction("关于 CtrlTranslate", menu)
@@ -80,6 +83,7 @@ class TrayController(QObject):
         menu.addAction(act_settings)
         menu.addAction(act_library)
         menu.addAction(self.act_ocr)
+        menu.addAction(self.act_term_ocr)
         menu.addMenu(web_menu)
         menu.addSeparator()
         menu.addAction(act_update)

@@ -72,6 +72,7 @@ class SettingsDialog(QDialog):
             ("tts", "语音播报"),
             ("trigger", "触发与取词"),
             ("popup", "弹窗外观"),
+            ("prompts", "提示词模板"),
             ("data", "历史与数据"),
             ("backup", "数据备份"),
         ]:
@@ -84,6 +85,7 @@ class SettingsDialog(QDialog):
         self.pages.addWidget(self._page_tts())
         self.pages.addWidget(self._page_trigger())
         self.pages.addWidget(self._page_popup())
+        self.pages.addWidget(self._page_prompts())
         self.pages.addWidget(self._page_data())
         self.pages.addWidget(self._page_backup())
 
@@ -262,12 +264,15 @@ class SettingsDialog(QDialog):
         webai_head.setObjectName("sectionTitle")
         self.ck_webai = QCheckBox("启用（划词/截图改走内嵌网页版 DeepSeek，无需 API Key）")
         self.ck_webai.setChecked(webai.get("enabled", False))
+        self.ck_auto_terms = QCheckBox("自动把【术语】段收录进生词本（网页引擎回复 + 术语解释模式）")
+        self.ck_auto_terms.setChecked(webai.get("auto_terms", True))
         lbl_webai_hint = QLabel("首次使用会弹出网页窗口，登录 DeepSeek 一次即可长期有效；"
                                 "速度取决于网页服务。与 API 模式二选一，重试按钮跟随各自引擎。")
         lbl_webai_hint.setObjectName("dim")
         lbl_webai_hint.setWordWrap(True)
         form.addRow(webai_head)
         form.addRow("", self.ck_webai)
+        form.addRow("", self.ck_auto_terms)
         form.addRow("", lbl_webai_hint)
         return _scroll(page)
 
@@ -420,6 +425,19 @@ class SettingsDialog(QDialog):
                               "智谱 glm-4v-flash 免费，填了翻译 Key 即可直接用")
         lbl_ocr_hint.setObjectName("dim")
 
+        # ---- 术语解释 ----
+        term = self.cfg.get("term", {})
+        term_head = QLabel("术语解释")
+        term_head.setObjectName("sectionTitle")
+        self.ck_term = QCheckBox("启用（划词后按热键向引擎提问术语含义；未划到词自动转为框选截图）")
+        self.ck_term.setChecked(term.get("enabled", True))
+        self.ed_term_hotkey = QLineEdit(term.get("hotkey", "alt+e"))
+        self.ed_term_hotkey.setPlaceholderText("如 alt+e；留空 = 禁用热键（仍可从托盘菜单触发截图解释）")
+        lbl_term_hint = QLabel("回答第一行是一句话通俗定义，连同关联术语自动进生词本"
+                               "（受翻译服务页「自动收录」开关控制）。提示词可在「提示词模板」页自定义。")
+        lbl_term_hint.setObjectName("dim")
+        lbl_term_hint.setWordWrap(True)
+
         form.addRow("", self.ck_hotkey)
         form.addRow("触发键", self.cb_key)
         form.addRow("双击判定间隔", _hbox(self.sl_interval, self.lbl_interval))
@@ -431,6 +449,10 @@ class SettingsDialog(QDialog):
         form.addRow("识别模型", self.cb_ocr_model)
         form.addRow("截图热键", self.ed_ocr_hotkey)
         form.addRow("", lbl_ocr_hint)
+        form.addRow(term_head)
+        form.addRow("", self.ck_term)
+        form.addRow("术语解释热键", self.ed_term_hotkey)
+        form.addRow("", lbl_term_hint)
         return _scroll(page)
 
     def _page_popup(self) -> QWidget:
@@ -468,6 +490,44 @@ class SettingsDialog(QDialog):
         form.addRow("不透明度", _hbox(self.sl_opacity, self.lbl_opacity))
         form.addRow("弹窗宽度", self.sp_width)
         form.addRow("自动关闭", self.sp_autoclose)
+        return _scroll(page)
+
+    def _page_prompts(self) -> QWidget:
+        """提示词模板：六套留空即用内置默认；{text} 占位符。
+
+        作用域：网页引擎全部 payload + 术语解释模式（两引擎）。
+        API 模式的划词/截图翻译自定义走翻译服务页的自定义 Prompt（system 覆盖，
+        语义不同故不合并——模板是 user 指令，custom_prompt 是 system）。"""
+        pr = self.cfg.setdefault("prompts", {})
+        form, page = self._page("提示词模板")
+
+        lbl_hint = QLabel("留空 = 用内置默认模板；{text} 代表划词原文/识别出的文字。"
+                          "以下模板作用于：网页版引擎的全部请求 + 术语解释模式（两引擎通用）。"
+                          "API 模式的划词/截图翻译自定义在「翻译服务 → 自定义 Prompt」。")
+        lbl_hint.setObjectName("dim")
+        lbl_hint.setWordWrap(True)
+
+        def _tpl(key: str, title: str, placeholder: str) -> None:
+            ed = QPlainTextEdit(pr.get(key, ""))
+            ed.setPlaceholderText(placeholder)
+            ed.setFixedHeight(88)
+            self._prompt_edits[key] = ed
+            form.addRow(title, ed)
+
+        self._prompt_edits: dict[str, QPlainTextEdit] = {}
+        form.addRow("", lbl_hint)
+        _tpl("translate_study", "划词翻译 · 学习（网页）",
+             "内置：请将下面的文字翻译成中文…含专业术语时在译文后另起「【术语】」段…{text}")
+        _tpl("translate_concise", "划词翻译 · 简洁（网页）",
+             "内置：请将下面的文字翻译成中文，只输出译文，不要解释。{text}")
+        _tpl("ocr_study", "截图翻译 · 学习（网页）",
+             "内置：识别图片中的文字并翻译成中文…若含专业术语另起「【术语】」段…")
+        _tpl("ocr_concise", "截图翻译 · 简洁（网页）",
+             "内置：识别图片中的文字并翻译成中文。只输出译文，不要解释。")
+        _tpl("term", "术语解释 · 划词",
+             "内置：请解释计算机科研领域的专业术语「{text}」…第一行一句话通俗定义…")
+        _tpl("ocr_term", "术语解释 · 截图",
+             "内置：识别图片中的专业术语并逐条通俗解释…最后汇总「【术语】」段…")
         return _scroll(page)
 
     def _page_data(self) -> QWidget:
@@ -770,8 +830,17 @@ class SettingsDialog(QDialog):
         o["model"] = self.cb_ocr_model.currentText().strip()
         o["hotkey"] = self.ed_ocr_hotkey.text().strip()
 
+        t = cfg.setdefault("term", {})
+        t["enabled"] = self.ck_term.isChecked()
+        t["hotkey"] = self.ed_term_hotkey.text().strip()
+
         w = cfg.setdefault("webai", {})
         w["enabled"] = self.ck_webai.isChecked()
+        w["auto_terms"] = self.ck_auto_terms.isChecked()
+
+        pr = cfg.setdefault("prompts", {})
+        for key, ed in self._prompt_edits.items():
+            pr[key] = ed.toPlainText().strip()
 
         po = cfg["popup"]
         po["theme"] = self.cb_theme.currentData()

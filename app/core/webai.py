@@ -242,9 +242,10 @@ class WebAIEngine(QObject):
         self._image_bytes = png_bytes
         return self._submit(prompt, image=True)
 
-    def translate(self, text: str, use_cache: bool = False) -> int:
+    def translate(self, text: str, use_cache: bool = False, raw: bool = False) -> int:
         """与 Translator.translate 同名兼容：popup 统一入口直接切换引擎。
-        use_cache 被忽略（网页会话自身有上下文，不落文本缓存）。"""
+        use_cache 被忽略（网页会话自身有上下文，不落文本缓存）；
+        raw 被忽略（网页 payload 本就是完整指令，无 system 概念）。"""
         return self.submit_text(text)
 
     def new_session(self) -> bool:

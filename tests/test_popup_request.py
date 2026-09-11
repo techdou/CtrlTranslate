@@ -11,10 +11,10 @@ from app.config import DEFAULT_CONFIG
 
 class _FakeTranslator:
     def __init__(self):
-        self.calls: list[tuple[str, bool]] = []
+        self.calls: list[tuple[str, bool, bool]] = []
 
-    def translate(self, text: str, use_cache: bool = True) -> int:
-        self.calls.append((text, use_cache))
+    def translate(self, text: str, use_cache: bool = True, raw: bool = False) -> int:
+        self.calls.append((text, use_cache, raw))
         return 100
 
 
@@ -40,7 +40,7 @@ def test_show_translation_default_sends_request(popup):
     tid = p.show_translation("hello")
     assert tid == 100
     assert p._task_id == 100
-    assert eng.calls == [("hello", True)]
+    assert eng.calls == [("hello", True, False)]
 
 
 def test_show_translation_request_false_skips(popup):
@@ -70,7 +70,7 @@ def test_payload_sent_to_engine_not_source(popup):
     """网页模式：source 仅预览/历史，payload（带指令 prompt）才是发给引擎的内容。"""
     p, eng = popup
     p.show_translation("hello world", engine=None, payload="请翻译：hello world")
-    assert eng.calls == [("请翻译：hello world", True)]  # 发的是 payload
+    assert eng.calls == [("请翻译：hello world", True, False)]  # 发的是 payload
     assert p._source == "hello world"                     # 预览保持原文
 
 
@@ -79,7 +79,7 @@ def test_busy_minus_one_shows_error(popup):
     p, eng = popup
 
     class _BusyEngine:
-        def translate(self, text, use_cache=True):
+        def translate(self, text, use_cache=True, raw=False):
             return -1
 
     tid = p.show_translation("hello", engine=_BusyEngine())
@@ -106,9 +106,9 @@ def test_text_retry_resends_payload(popup):
     """文本态重试：重发 payload（网页模式完整 prompt）而非 source。"""
     p, eng = popup
     p.show_translation("原文", engine=None, payload="指令+原文")
-    assert eng.calls == [("指令+原文", True)]
+    assert eng.calls == [("指令+原文", True, False)]
     p._retry()
-    assert eng.calls[-1] == ("指令+原文", False)  # 重试 force=True → use_cache=False
+    assert eng.calls[-1] == ("指令+原文", False, False)  # 重试 force=True → use_cache=False
 
 
 def test_show_result_resets_engine_state(popup):
@@ -161,3 +161,24 @@ def test_toggle_webai_enabled_pure_function():
     cfg2 = {}
     assert main.toggle_webai_enabled(cfg2) is True
     assert cfg2["webai"]["enabled"] is True
+
+
+# ---------------------------------------------------------------- raw 指令态（术语解释）
+
+def test_raw_mode_passed_to_translator(popup):
+    """raw=True（术语解释）：translate 收到 raw=True，重试沿用 raw 态。"""
+    p, eng = popup
+    p.show_translation("transformer", payload="请解释术语 transformer", raw=True)
+    assert eng.calls == [("请解释术语 transformer", True, True)]
+    p._retry()
+    assert eng.calls[-1] == ("请解释术语 transformer", False, True)  # raw 沿用
+
+
+def test_show_result_resets_raw(popup):
+    """历史回看后 raw 复位——重试回退普通翻译而非术语解释指令。"""
+    p, eng = popup
+    p.show_translation("term", payload="解释 term", raw=True)
+    p.show_result("历史原文", "历史译文")
+    assert p._raw is False
+    p._retry()
+    assert eng.calls[-1][2] is False

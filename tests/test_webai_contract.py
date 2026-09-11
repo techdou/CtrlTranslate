@@ -96,9 +96,23 @@ def test_main_webai_prompts_carry_text_placeholder():
 
     assert "{text}" in main.WEBAI_TRANSLATE_PROMPT
     assert "{text}" in main.WEBAI_TRANSLATE_PROMPT_CONCISE
+    assert "{text}" in main.WEBAI_TERM_PROMPT  # 术语解释：{text}=划词原文
     assert main.WEBAI_OCR_PROMPT  # 截图指令非空
     assert main.WEBAI_OCR_PROMPT_CONCISE
+    assert main.WEBAI_OCR_TERM_PROMPT  # 截图术语解释指令非空（贴图任务无 {text}）
     # 学习版要求「【术语】」段——与 vocabulary.parse_terms 解析格式对齐，
     # 网页模式完成后靠这段自动归档术语到生词本
     assert "【术语】" in main.WEBAI_TRANSLATE_PROMPT
     assert "【术语】" in main.WEBAI_OCR_PROMPT
+    assert "【术语】" in main.WEBAI_TERM_PROMPT
+    assert "【术语】" in main.WEBAI_OCR_TERM_PROMPT
+
+
+def test_resolve_prompt_falls_back_to_default():
+    """模板留空回退内置默认（提示词模板机制的纯函数核心）。"""
+    import main
+
+    cfg = {"prompts": {"term": "自定义 {text}", "translate_study": "   "}}
+    assert main.resolve_prompt(cfg, "term", "默认") == "自定义 {text}"
+    assert main.resolve_prompt(cfg, "translate_study", "默认") == "默认"  # 空白视同留空
+    assert main.resolve_prompt({}, "term", "默认") == "默认"  # 无 prompts 段的旧配置
