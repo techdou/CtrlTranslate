@@ -18,7 +18,6 @@ from __future__ import annotations
 import html
 import logging
 import math
-import re
 
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QCursor, QGuiApplication, QTextCursor, QTextOption
@@ -35,6 +34,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.core.vocabulary import TERM_SECTION_RE, parse_terms
 from app.db import database
 from app.ui.motion import animate, breathe
 from app.ui.theme import MOTION, RADIUS, SHADOW, palette
@@ -55,28 +55,6 @@ def _derived_fs(fs: int) -> tuple[int, int]:
     状态行/术语标题用小号（fs-2, 下限 12），术语正文略大（fs-1, 下限 13）
     ——术语是读外刊最需要看清的部分，不能比状态行还小。"""
     return max(fs - 2, 12), max(fs - 1, 13)
-_TERM_SPLIT = re.compile(r"^【术语】\s*$", re.MULTILINE)
-_TERM_SEPS = [" — ", "—", " - ", " – ", "-"]
-
-
-def _parse_terms(text: str) -> list[tuple[str, str]]:
-    """解析译文里的【术语】段：每行一条 (术语, 含义)。分隔符容错多种破折号。"""
-    parts = _TERM_SPLIT.split(text or "")
-    if len(parts) < 2:
-        return []
-    out: list[tuple[str, str]] = []
-    for raw in parts[1].splitlines():
-        ln = raw.strip().lstrip("-·•* ").strip()  # LLM 偶尔加列表符号
-        if not ln:
-            continue
-        for sep in _TERM_SEPS:
-            word, _, meaning = ln.partition(sep)
-            if meaning.strip():
-                out.append((word.strip()[:500], meaning.strip()[:400]))
-                break
-        else:
-            out.append((ln[:500], ""))  # 无分隔符：整行当术语
-    return out
 
 
 class TranslatePopup(QWidget):
@@ -524,7 +502,7 @@ class TranslatePopup(QWidget):
         self.source_label.setVisible(True)
         self._hide_skeleton()
         self.result_view.setFixedHeight(60)  # 清掉上次残留的 fixed 高度，再由 _fit_height 按内容定
-        self._terms = _parse_terms(translated or "")
+        self._terms = parse_terms(translated or "")
         self.result_view.setHtml(_format_result(translated or "（无译文）", self._p, self._terms, fs=self._fs))
         self._set_status("")
         for b in (self.btn_speak_source, self.btn_speak_trans, self.btn_star,
@@ -666,10 +644,10 @@ class TranslatePopup(QWidget):
         self._grow_timer.stop()  # 完成态直接重排，作废可能还挂着的节流重排
         self._hide_skeleton()    # 缓存命中时无 on_chunk，占位可能还挂着
         self._translated = text
-        self._terms = _parse_terms(text)
+        self._terms = parse_terms(text)
         # 两段式：先渲染纯译文平滑长高；有术语时延迟 dur_grow 再追加——
         # 一次"纯文本→富文本+术语块"的视觉大跳拆成两次柔和的小动作
-        body = html.escape(_TERM_SPLIT.split(text)[0].strip())
+        body = html.escape(TERM_SECTION_RE.split(text)[0].strip())
         self.result_view.setHtml(body)
         for b in (self.btn_speak_trans, self.btn_star, self.btn_copy):
             b.setEnabled(True)
@@ -902,11 +880,11 @@ def _format_result(text: str, p: dict, terms: list[tuple[str, str]] | None = Non
     用户调大字号时术语区不跟随，同一屏两种尺度。"""
     accent, border, body_color = p["accent"], p["border"], p["text"]
     fs_small, fs_term = _derived_fs(fs)
-    parts = _TERM_SPLIT.split(text)
+    parts = TERM_SECTION_RE.split(text)
     body = html.escape(parts[0].strip())
     if len(parts) > 1:
         if terms is None:
-            terms = _parse_terms(text)
+            terms = parse_terms(text)
         rows = []
         for i, (word, meaning) in enumerate(terms):
             line = html.escape(f"{word} — {meaning}" if meaning else word)

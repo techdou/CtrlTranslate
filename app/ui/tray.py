@@ -26,6 +26,7 @@ class TrayController(QObject):
     webai_window_requested = Signal()   # 打开内嵌网页窗口（登录 / 手动对话）
     webai_new_session = Signal()        # 网页会话开新主题（清上下文）
     webai_upload_requested = Signal()   # 上传文档到网页会话（上下文附件）
+    webai_engine_changed = Signal(bool) # 勾选切换 API/网页引擎（网页模式无弹窗后的切换入口）
 
     def __init__(self, icon: QIcon, enabled: bool = True, key: str = "ctrl",
                  parent: QObject | None = None):
@@ -59,12 +60,16 @@ class TrayController(QObject):
 
         # 网页版引擎子菜单（无网页任务时也可用：登录入口本就在这）
         web_menu = QMenu("网页翻译", menu)
+        self.act_webai_engine = QAction("启用网页版引擎（划词走 DeepSeek）", web_menu)
+        self.act_webai_engine.setCheckable(True)
+        self.act_webai_engine.toggled.connect(self.webai_engine_changed.emit)
         act_web_open = QAction("打开网页窗口（登录 / 对话）…", web_menu)
         act_web_open.triggered.connect(self.webai_window_requested.emit)
         act_web_new = QAction("开启新会话（清上下文）", web_menu)
         act_web_new.triggered.connect(self.webai_new_session.emit)
         act_web_upload = QAction("上传文档到会话…", web_menu)
         act_web_upload.triggered.connect(self.webai_upload_requested.emit)
+        web_menu.addAction(self.act_webai_engine)
         web_menu.addAction(act_web_open)
         web_menu.addAction(act_web_new)
         web_menu.addAction(act_web_upload)
@@ -88,6 +93,11 @@ class TrayController(QObject):
 
     def set_autostart_checked(self, on: bool) -> None:
         self.act_autostart.setChecked(on)
+
+    def set_webai_checked(self, on: bool) -> None:
+        """同步网页引擎勾选态（配置变更/弹窗切换后回调，不触发 toggled 之外的副作用——
+        setChecked 在值未变时也不发 toggled，值变化时 main 侧 on_tray_engine_changed 幂等）。"""
+        self.act_webai_engine.setChecked(on)
 
     def _on_activated(self, reason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.DoubleClick:

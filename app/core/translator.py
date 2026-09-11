@@ -34,15 +34,9 @@ STUDY_SYSTEM_PROMPT = """你是一名专业翻译引擎，服务于科研与工�
 CONCISE_SYSTEM_PROMPT = """你是一名专业翻译引擎。把用户给出的文本在中文与英文之间互译
 （英文为主译为中文，中文为主译为英文），只输出译文本身，忠实原意、术语准确，不要任何解释或标记。"""
 
-VISION_SYSTEM_PROMPT = """你是一名专业翻译引擎，服务于科研与工程文献的阅读场景。
-识别图片中的全部文字并在中文与英文之间互译（图内文字以英文为主则译为中文；以中文为主则译为英文）。
-要求：忠实原意、专业术语准确、语句通顺、不增删内容；忽略图片中的非文字元素。
-
-输出格式（严格遵守，不要输出任何额外说明、前后缀或代码块标记）：
-1. 直接给出完整译文；
-2. 若图中文字包含专业术语、缩写、领域黑话或值得学习的表达，在译文后另起一行输出“【术语】”，\
-之后每行一条：原文术语 — 中文含义（一句话解释）；
-3. 没有值得列出的术语就省略第 2 部分。"""
+OCR_SYSTEM_PROMPT = """你是一名 OCR 识别引擎。识别图片中的全部文字，按原始阅读顺序输出纯文本。
+只输出识别到的文字本身：不要翻译、不要解释、不要总结、不要添加任何说明或标记。
+图片中没有文字就输出空内容。"""
 
 
 def build_messages(cfg: dict, text: str) -> list[dict]:
@@ -53,12 +47,13 @@ def build_messages(cfg: dict, text: str) -> list[dict]:
     return [{"role": "system", "content": system}, {"role": "user", "content": text}]
 
 
-def build_vision_messages(image_b64: str) -> list[dict]:
-    """OCR 用：图片 + 翻译指令的多模态消息（OpenAI 协议格式，_stream_once 透传）。"""
+def build_ocr_messages(image_b64: str) -> list[dict]:
+    """OCR 第一阶段用：图片 + 纯识别指令的多模态消息（OpenAI 协议格式，
+    _stream_once 透传）。识别与翻译分离——见 _run_image_inner 注释。"""
     return [
-        {"role": "system", "content": VISION_SYSTEM_PROMPT},
+        {"role": "system", "content": OCR_SYSTEM_PROMPT},
         {"role": "user", "content": [
-            {"type": "text", "text": "请识别并翻译图片中的文字。"},
+            {"type": "text", "text": "请识别图片中的全部文字。"},
             {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
         ]},
     ]
@@ -98,6 +93,7 @@ class Translator(QObject):
     finished = Signal(str, int)        # 完整译文, task_id
     failed = Signal(str, int)          # 错误消息, task_id
     fallback_started = Signal(int)     # 主服务失败、开始用备用服务重试, task_id
+    ocr_text_ready = Signal(str, int)  # OCR 第一阶段识别出的原文, task_id
     test_result = Signal(object, str, bool)  # (回调, 消息, 是否成功) —— 后台线程结果回投主线程
 
     def __init__(self, cfg_getter, parent: QObject | None = None):
@@ -118,9 +114,14 @@ class Translator(QObject):
         return task_id
 
     def translate_image(self, image_b64: str) -> int:
-        """OCR 截图翻译：图片 base64 直发多模态模型。与文本翻译共用 task_id 体系
-        （互相作废）与流式信号；不读缓存（每次截图内容都不同）、不走 fallback
-        （备用服务是文本模型，接图必错）。"""
+        """OCR 截图翻译（两阶段）：视觉模型只做识别，识别文本再走普通文本
+        翻译链（study/concise prompt、术语段、缓存、备用服务全复用）。
+
+        两阶段的根因：glm-4v-flash 这类 OCR 专精模型指令遵循弱，"识别并翻译"
+        一步到位经常只回识别文本不翻译（真机实测）；识别交给它擅长的，翻译交回
+        文本模型。与文本翻译共用 task_id 体系（互相作废）与流式信号；不读图片
+        缓存（每次截图内容都不同），但识别出的文本走翻译缓存——同一段文字重复
+        截图秒出。识别阶段失败不走 fallback（备用是文本模型，接图必错）。"""
         with self._lock:
             self._task += 1
             task_id = self._task
@@ -272,15 +273,23 @@ class Translator(QObject):
             self.failed.emit("未配置 OCR 识别模型，请到 设置 → 触发与取词 → 屏幕截图翻译 填写", task_id)
             return
 
-        endpoint = (base_url, api_key, model)
+        # 阶段一：视觉模型纯识别（不发 chunk——用户要的是译文不是原文堆砌）
         timeout = float(cfg.get("translate", {}).get("timeout_s", 60))
-        messages = build_vision_messages(image_b64)
         try:
-            result = self._stream_once(endpoint, messages, timeout, task_id, get_proxy(cfg))
+            ocr_text = self._stream_once(
+                (base_url, api_key, model), build_ocr_messages(image_b64),
+                timeout, task_id, get_proxy(cfg))
         except Exception as e:
             self.failed.emit(self._friendly_error(e, base_url), task_id)
             return
-        self.finished.emit(result, task_id)
+        ocr_text = ocr_text.strip()
+        if not ocr_text:
+            self.failed.emit("未能从图片中识别出文字（截图区域可能没有文本）", task_id)
+            return
+        self.ocr_text_ready.emit(ocr_text, task_id)
+
+        # 阶段二：识别文本走普通文本翻译链（含缓存与备用服务 fallback）
+        self._run_inner(ocr_text, task_id, use_cache=True)
 
     def _test_run(self, on_ok, on_fail, endpoint: tuple[str, str, str] | None) -> None:
         base_url = ""

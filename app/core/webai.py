@@ -18,7 +18,7 @@ import logging
 import time
 
 from PySide6.QtCore import QObject, QTimer, QUrl, Signal
-from PySide6.QtGui import QGuiApplication, QImage
+from PySide6.QtGui import QCursor, QGuiApplication, QImage
 
 from app.core.capture import restore_clipboard, save_clipboard
 
@@ -192,7 +192,8 @@ class _WebAIWindow:
 class WebAIEngine(QObject):
     """单会话串行引擎：同一时间只处理一个任务（网页会话本质串行）。
 
-    流程：ensure_page（懒加载+登录检测）→ 动作（填字/贴图）→ 发送 →
+    流程：ensure_page（懒加载+登录检测）→ 窗口弹到前台（present_window，
+    网页模式的"弹窗"就是承载站点页面的本窗口）→ 动作（填字/贴图）→ 发送 →
     轮询回复区 → 稳定判定 → finished。任何一步失败走 failed（含中文
     用户可读原因）。
     """
@@ -207,7 +208,7 @@ class WebAIEngine(QObject):
         super().__init__(parent)
         self.adapter = ADAPTERS.get(site, DeepSeekAdapter)()
         self._page = None
-        self._win = None        # 承载窗口（默认最小化；贴图/登录弹前台）
+        self._win = None        # 承载窗口（boot 先最小化建出；任务触发即弹前台）
         self._poll: QTimer | None = None
         self._task = 0
         self._phase = "idle"    # idle/loading/ready/filling/sending/reading/pasting/uploading
@@ -223,7 +224,6 @@ class WebAIEngine(QObject):
         self._ns_attempted = False
         self._ns_deadline = 0.0
         self._paste_attempts = 0
-        self._retract_after_task = False   # 任务前窗口是收着的才在收尾收回
         self._nav_retries = 0
 
     # ---- 对外 API ----
@@ -265,10 +265,43 @@ class WebAIEngine(QObject):
         return True
 
     def show_window(self) -> None:
-        """把网页窗口弹到前台（登录引导 / 手动对话用）。"""
+        """手动打开网页窗口（托盘入口 / 登录引导）。"""
         if self._page is None:
             self._boot()  # 首次直接建 page+窗口并最小化，再弹出
-        self._ensure_window()
+        self.present_window()
+
+    def present_window(self) -> None:
+        """把网页窗口弹到前台并定位——网页模式下的"弹窗"就是本窗口：
+        划词/截图触发即弹出，用户直接在站点页面里看流式回复、继续追问。
+
+        已正常显示（用户摆过位置）只抬高不挪动；最小化/隐藏态则重新定位到
+        当前光标附近弹出。"""
+        if self._win is None:  # 理论到不了这（page 与窗口同生共死）；兜底重建
+            self._win = _WebAIWindow.make(
+                self._page, f"CtrlTranslate · 网页翻译（{self.adapter.name}）")
+        win = self._win
+        if win.isVisible() and not win.isMinimized():
+            win.raise_()
+            win.activateWindow()
+            return
+        self._place_near_cursor()
+        win.showNormal()
+        win.raise_()
+        win.activateWindow()
+
+    def _place_near_cursor(self) -> None:
+        """窗口弹到光标右下（右/底出屏则夹回光标所在屏的可用区）。"""
+        cur = QCursor.pos()
+        screen = QGuiApplication.screenAt(cur) or QGuiApplication.primaryScreen()
+        avail = screen.availableGeometry()
+        w, h = self._win.width(), self._win.height()
+        x = cur.x() + 24
+        y = cur.y() + 24
+        if x + w > avail.right():
+            x = avail.right() - w
+        if y + h > avail.bottom():
+            y = max(avail.top(), avail.bottom() - h)
+        self._win.move(max(avail.left(), x), y)
 
     def upload_file(self, path: str) -> None:
         """把文档喂给网页会话（作为后续翻译/问答的上下文附件）。
@@ -307,8 +340,12 @@ class WebAIEngine(QObject):
         self._deadline = time.monotonic() + TASK_TIMEOUT_S
         if self._page is None:
             self._boot()
-        else:
-            self._ensure_ready()
+            if self._page is None:
+                # boot 失败（轻量版无 WebEngine 组件）：failed 已随本任务号发出，
+                # 页面不存在、无窗口可呈现，直接返回让上层走 failed 通道提示
+                return self._task
+        self.present_window()
+        self._ensure_ready()
         return self._task
 
     def _boot(self) -> None:
@@ -383,7 +420,7 @@ class WebAIEngine(QObject):
         if d is None:
             return
         if self.adapter.login_marker in d.get("url", ""):
-            self._ensure_window()
+            self.present_window()
             self.login_required.emit()
             self._fail("网页版未登录——请在弹出的窗口中登录后再试")
             return
@@ -452,7 +489,6 @@ class WebAIEngine(QObject):
     def _cleanup_task(self) -> None:
         self._stop_poll()
         self._settle_clipboard()
-        self._retract_window()
         self._phase = "idle"
 
     def _settle_clipboard(self) -> None:
@@ -531,25 +567,9 @@ class WebAIEngine(QObject):
 
     # ---- 动作：贴图（真实键盘输入管线）----
 
-    def _ensure_window(self):
-        """贴图/登录需要可见窗口：把承载窗口弹到前台。"""
-        if self._win is not None:
-            self._win.showNormal()
-            self._win.raise_()
-            self._win.activateWindow()
-            return
-        # 理论到不了这（page 与窗口同生共死）；兜底重建
-        self._win = _WebAIWindow.make(
-            self._page, f"CtrlTranslate · 网页翻译（{self.adapter.name}）")
-        self._win.show()
-
     def _do_paste_image(self) -> None:
-        # 任务前窗口是收着的，收尾才收回；用户开着窗口手动对话时不抢
-        self._retract_after_task = not (self._win is not None and self._win.isVisible())
-        self._ensure_window()
-        self._win.showNormal()
-        self._win.raise_()
-        self._win.activateWindow()
+        # 贴图需要真实键盘输入（isTrusted），窗口必须可见且持有系统焦点
+        self.present_window()
         self._phase = "pasting"
         QTimer.singleShot(400, self._paste_now)
 
@@ -608,13 +628,7 @@ class WebAIEngine(QObject):
         if self._phase != "pasting":
             return
         self._settle_clipboard()   # 立刻恢复用户剪贴板（图已进网页）
-        self._retract_window()     # 缩回窗口，后续流程全后台
         self._do_fill()
-
-    def _retract_window(self) -> None:
-        if self._retract_after_task and self._win is not None and self._win.isVisible():
-            self._win.showMinimized()
-        self._retract_after_task = False
 
     # ---- 新会话 ----
 

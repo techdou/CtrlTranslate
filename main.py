@@ -24,7 +24,7 @@ from app.core.translator import Translator
 from app.core.webai import WebAIEngine
 from app.core.tts import TTSService
 from app.core.update import UpdateChecker, is_newer
-from app.core.vocabulary import record_history
+from app.core.vocabulary import archive_terms, parse_terms, record_history
 from app.db import database
 from app.logger import setup_logger
 from app.ui.library import LibraryWindow
@@ -36,8 +36,13 @@ from app.ui.tray import TrayController
 
 # 网页模式注入指令：网页会话无 system 角色，指令拼在用户消息前、跟随每次
 # 请求注入（长会话下首条指令会漂移——spike 实测）。学习版要求「【术语】」段，
-# 与 API 模式学习模式的 popup._parse_terms 解析格式对齐。
-WEBAI_OCR_PROMPT = "识别图片中的文字，翻译成中文。只输出译文，不要解释。"
+# 与 API 模式学习模式的术语解析格式对齐（vocabulary.parse_terms），网页模式
+# 完成后据此自动归档术语到生词本。
+WEBAI_OCR_PROMPT = (
+    "识别图片中的文字并翻译成中文，只输出译文。若含专业术语，在译文后另起"
+    "「【术语】」段落，每行一条，格式：术语 — 中文解释。"
+)
+WEBAI_OCR_PROMPT_CONCISE = "识别图片中的文字并翻译成中文。只输出译文，不要解释。"
 WEBAI_TRANSLATE_PROMPT = (
     "请将下面的文字翻译成中文，只输出译文。若含专业术语，在译文后另起"
     "「【术语】」段落，每行一条，格式：术语 — 中文解释。\n\n{text}"
@@ -101,6 +106,7 @@ class CtrlApp(QObject):
         # 会话状态
         self._current_source = ""
         self._current_app = ""
+        self._pipeline_task = -1  # 最近一次发起的任务号：finished 归档（历史/术语/TTS）守卫
         self._library: LibraryWindow | None = None
         self._settings: SettingsDialog | None = None
         self._overlay: ScreenshotOverlay | None = None
@@ -138,9 +144,11 @@ class CtrlApp(QObject):
         self.translator.finished.connect(self.on_translated)
         self.translator.failed.connect(self.popup.on_error)
         self.translator.fallback_started.connect(self.popup.on_fallback_started)
-        self.webai.chunk.connect(self.popup.on_chunk)
+        self.translator.ocr_text_ready.connect(self.on_ocr_text)
+        # 网页模式不弹自定义弹窗（弹窗=内嵌站点页面，见 WebAIEngine.present_window），
+        # 引擎信号只接归档/提示通道
         self.webai.finished.connect(self.on_translated)
-        self.webai.failed.connect(self.popup.on_error)
+        self.webai.failed.connect(self.on_webai_failed)
         self.webai.login_required.connect(self.on_webai_login_required)
         self.webai.upload_done.connect(self.on_webai_upload_done)
         self.popup.ocr_retry_requested.connect(self.on_ocr_retry)
@@ -152,6 +160,7 @@ class CtrlApp(QObject):
         self.tray.webai_window_requested.connect(self.webai.show_window)
         self.tray.webai_new_session.connect(self.on_webai_new_session)
         self.tray.webai_upload_requested.connect(self.on_webai_upload)
+        self.tray.webai_engine_changed.connect(self.on_tray_engine_changed)
         self.ocr_hotkey.triggered.connect(self.on_ocr)
         self.tray.enabled_changed.connect(self.on_enabled_changed)
         self.tray.autostart_changed.connect(self.on_autostart_changed)
@@ -165,6 +174,7 @@ class CtrlApp(QObject):
         if enabled:
             if not self.hotkey.start():
                 self.tray.notify("启动失败", "全局键盘钩子初始化失败（权限不足？）", 6)
+        self.tray.set_webai_checked(self._webai_enabled())
         self._sync_ocr_hotkey()
         self.tray.act_ocr.setEnabled(self.cfg.get("ocr", {}).get("enabled", True))
         if not self.cfg["provider"].get("api_key"):
@@ -193,17 +203,18 @@ class CtrlApp(QObject):
     def on_captured(self, text: str, method: str) -> None:
         self._current_source = text
         if not self._webai_enabled():
-            self.popup.show_translation(text, method)
+            self._pipeline_task = self.popup.show_translation(text, method)
             return
+        # 网页模式：不弹自定义弹窗，引擎窗口（内嵌站点页面）直接弹出承接，
+        # 用户在站点页面里看流式回复、继续追问
         if self.webai.is_busy:
-            self.popup.show_message("网页引擎正在处理上一条，请稍候再试")
+            self.tray.notify("网页翻译", "上一条还在处理，请稍候再试", 4)
             return
         # 网页会话无 system 角色：翻译指令拼进 payload 随消息注入；
-        # source 保持原文只用于弹窗预览与历史记录
+        # source 保持原文用于历史记录与术语归档的上下文
         mode = self.cfg.get("translate", {}).get("mode", "study")
         tpl = WEBAI_TRANSLATE_PROMPT if mode == "study" else WEBAI_TRANSLATE_PROMPT_CONCISE
-        self.popup.show_translation(text, method, engine=self.webai,
-                                    payload=tpl.format(text=text))
+        self._pipeline_task = self.webai.submit_text(tpl.format(text=text))
 
     # ---------------------------------------------------------------- OCR 截图翻译
 
@@ -221,16 +232,21 @@ class CtrlApp(QObject):
 
     def _on_ocr_selected(self, png: bytes) -> None:
         self._discard_overlay()
-        if self._webai_enabled() and self.webai.is_busy:
-            self.popup.show_message("网页引擎正在处理上一条，请稍候再试")
+        if self._webai_enabled():
+            if self.webai.is_busy:
+                self.tray.notify("网页翻译", "上一条还在处理，请稍候再试", 4)
+                return
+            self._last_ocr_png = png  # 重试链：截图 bytes 在 main 手里
+            mode = self.cfg.get("translate", {}).get("mode", "study")
+            prompt = WEBAI_OCR_PROMPT if mode == "study" else WEBAI_OCR_PROMPT_CONCISE
+            self._pipeline_task = self.webai.submit_image(png, prompt)
             return
         self._last_ocr_png = png  # OCR 重试链：popup 只发信号，截图在这里
+        self._pipeline_task = -1  # 待 adopt_task 挂回真实任务
         self.popup.show_translation("屏幕截图 OCR", method="ocr", request=False)
-        if self._webai_enabled():
-            tid = self.webai.submit_image(png, WEBAI_OCR_PROMPT)
-        else:
-            tid = self.translator.translate_image(base64.b64encode(png).decode("ascii"))
+        tid = self.translator.translate_image(base64.b64encode(png).decode("ascii"))
         self.popup.adopt_task(tid)
+        self._pipeline_task = tid
 
     def on_ocr_retry(self) -> None:
         """popup 重试按钮（OCR 态）回调：用最近一次截图重走识别链。"""
@@ -238,16 +254,37 @@ class CtrlApp(QObject):
         if png:
             self._on_ocr_selected(png)
 
+    def on_ocr_text(self, text: str, task_id: int) -> None:
+        """OCR 第一阶段识别完成：把识别出的真实原文补进会话状态与弹窗预览，
+        历史/生词本 context 记录的才是图片里的文字，而非"（屏幕截图）"占位。"""
+        if task_id != self._pipeline_task:
+            return
+        if self._current_app == "OCR":
+            self._current_source = text
+            self.popup._set_source_preview(text, "原文 · 屏幕截图识别")
+
     def on_engine_toggle(self) -> None:
-        """弹窗一键切换引擎：写配置（单入口）+ 同步设置页勾选 + 状态栏反馈。"""
+        """弹窗一键切换引擎：写配置（单入口）+ 同步设置页/托盘勾选 + 状态栏反馈。"""
         enabled = toggle_webai_enabled(self.cfg)
         save_config(self.cfg)
         self.popup.refresh_engine_button()
         self.popup._flash_status("已切换为网页版引擎，下次划词生效" if enabled
                                  else "已切换为 API 模式，下次划词生效")
+        self.tray.set_webai_checked(enabled)
         # 设置窗开着时同步勾选，防保存时旧勾选覆盖刚切的引擎
         if self._settings is not None:
             self._settings.ck_webai.setChecked(enabled)
+
+    def on_tray_engine_changed(self, enabled: bool) -> None:
+        """托盘勾选切引擎：与弹窗一键切换共用同一配置入口（防两处状态分叉）。"""
+        if enabled != self._webai_enabled():
+            self.on_engine_toggle()
+        else:
+            self.tray.set_webai_checked(enabled)  # 勾选态与配置本就一致：复位勾选框
+
+    def on_webai_failed(self, message: str, task_id: int) -> None:
+        # 网页模式没有自定义弹窗承接错误：统一走托盘通知
+        self.tray.notify("网页翻译", message, 8)
 
     def on_webai_login_required(self) -> None:
         # 引擎已弹窗口引导登录；错误文案经 failed（划词）或 upload_done（上传）
@@ -294,16 +331,27 @@ class CtrlApp(QObject):
             self.ocr_hotkey.stop()
 
     def on_translated(self, translated: str, task_id: int) -> None:
+        # popup 渲染：任务号不匹配（网页模式没展示弹窗 / 旧任务）由其内部守卫丢弃
         self.popup.on_done(translated, task_id)
-        if self.popup._task_id != task_id:
+        if task_id != self._pipeline_task:
             return
+        self._pipeline_task = -1  # 双保险：finished 每个任务只归档一次
         record_history(self.cfg, self._current_source, translated, self._current_app)
+        # 网页模式弹窗即站点页面，术语没有 ☆ 逐条收藏入口——完成后自动入生词本
+        # （同词幂等 upsert）；API 模式保留弹窗里手动 ☆ 收藏
+        if self._webai_enabled():
+            mode = self.cfg.get("translate", {}).get("mode", "study")
+            if mode == "study":
+                n = archive_terms(parse_terms(translated),
+                                  context=self._current_source)
+                if n:
+                    self.logger.info("webai terms archived: %d", n)
         tts_cfg = self.cfg.get("tts", {})
         if tts_cfg.get("enabled") and tts_cfg.get("auto_play"):
             what = tts_cfg.get("auto_play_what", "source")
             text = self._current_source if what == "source" else translated
             if self._current_app == "OCR":
-                text = translated  # 截图场景没有原文文本，播译文
+                text = translated  # 截图场景识别原文已可得，但朗读语境下译文更直接
             QTimer.singleShot(120, lambda: self.tts.speak(text))  # 音色由 TTS 按内容语言自选
 
     # ---------------------------------------------------------------- 窗口
@@ -386,6 +434,7 @@ class CtrlApp(QObject):
         self.tray.set_trigger_key(new_cfg["trigger"].get("key", "ctrl"))
         self._sync_ocr_hotkey()
         self.tray.act_ocr.setEnabled(new_cfg.get("ocr", {}).get("enabled", True))
+        self.tray.set_webai_checked(self._webai_enabled())
 
         self.popup._apply_style()
         self.qapp.setStyleSheet(build_qss(palette(new_cfg["popup"]["theme"])))

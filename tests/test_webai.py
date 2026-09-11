@@ -46,6 +46,8 @@ def engine(qapp):
 
     eng = WebAIEngine()
     eng._phase = "idle"
+    # 单测不把承载窗口弹到前台（_submit 现在会触发 present_window 抢焦点）
+    eng.present_window = lambda: None
     return eng
 
 
