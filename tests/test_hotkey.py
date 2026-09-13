@@ -2,7 +2,7 @@ import time
 
 import pytest
 
-from app.core.hotkey import DoubleTapDetector
+from app.core.hotkey import ComboDetector, DoubleTapDetector, format_hotkey
 
 pytestmark = pytest.mark.usefixtures("qapp")
 
@@ -133,6 +133,140 @@ def test_service_set_key_switches_detector():
 
 
 # ---------------------------------------------------------------- SimpleHotkey 跨线程语义
+
+# ---------------------------------------------------------------- ComboDetector（组合热键状态机）
+
+def combo_events(det: ComboDetector, events):
+    """events: [(name, is_down)]；返回触发次数。"""
+    fired = 0
+    for name, down in events:
+        if det.feed(name, down):
+            fired += 1
+    return fired
+
+
+def test_combo_alt_q_fires():
+    d = ComboDetector("alt+q")
+    assert combo_events(d, [
+        ("alt", 1), ("q", 1), ("q", 0), ("alt", 0),
+    ]) == 1
+
+
+def test_combo_fast_press_release_still_fires():
+    # 快按快放（add_hotkey 查表竞态的触发场景）：状态机只吃顺序流，不受影响
+    d = ComboDetector("alt+q")
+    assert combo_events(d, [
+        ("alt", 1), ("q", 1), ("q", 0), ("alt", 0),
+        ("alt", 1), ("q", 1), ("q", 0), ("alt", 0),
+    ]) == 2
+
+
+def test_combo_without_modifier_no_fire():
+    d = ComboDetector("alt+q")
+    assert combo_events(d, [("q", 1), ("q", 0)]) == 0
+
+
+def test_combo_extra_modifier_no_fire():
+    # alt+shift+q 不命中 alt+q（与 add_hotkey 语义一致）
+    d = ComboDetector("alt+q")
+    assert combo_events(d, [
+        ("alt", 1), ("shift", 1), ("q", 1), ("q", 0), ("shift", 0), ("alt", 0),
+    ]) == 0
+
+
+def test_combo_key_repeat_fires_once():
+    # 目标键按住不放的系统重复 down 只触发一次
+    d = ComboDetector("alt+q")
+    assert combo_events(d, [
+        ("alt", 1), ("q", 1), ("q", 1), ("q", 1), ("q", 0), ("alt", 0),
+    ]) == 1
+
+
+def test_combo_refire_after_key_release():
+    d = ComboDetector("alt+q")
+    events = [("alt", 1), ("q", 1), ("q", 0), ("q", 1)]
+    assert combo_events(d, events) == 2
+
+
+def test_combo_left_right_modifier_equivalent():
+    d = ComboDetector("ctrl+s")
+    assert combo_events(d, [
+        ("right ctrl", 1), ("s", 1), ("s", 0), ("right ctrl", 0),
+    ]) == 1
+
+
+def test_combo_modifier_up_before_target_no_fire():
+    # alt 已抬起再按 q：不触发
+    d = ComboDetector("alt+q")
+    assert combo_events(d, [
+        ("alt", 1), ("alt", 0), ("q", 1), ("q", 0),
+    ]) == 0
+
+
+def test_combo_released_modifier_resets():
+    # alt↓ q↓(触发) q↑ alt↑ alt↓ q↓：再次触发
+    d = ComboDetector("alt+q")
+    assert combo_events(d, [
+        ("alt", 1), ("q", 1), ("q", 0), ("alt", 0),
+        ("alt", 1), ("q", 1),
+    ]) == 2
+
+
+def test_resync_drops_stale_modifier():
+    # 抬起事件丢失场景：状态机残留 alt，物理复核发现没按 → 自愈并拦截误触发
+    d = ComboDetector("alt+q")
+    assert d.feed("alt", 1) is False        # alt down（up 事件丢失）
+    assert d.resync_modifiers(set()) is False
+    assert d.feed("q", 1) is False          # 自愈后裸按 q 不再误触发
+    assert d.feed("q", 0) is False
+
+
+def test_resync_confirms_match():
+    d = ComboDetector("alt+q")
+    d.feed("alt", 1)
+    assert d.resync_modifiers({"alt"}) is True
+
+
+def test_resync_extra_modifier_blocks():
+    # 物理上还按着 shift（alt+shift+q）：不构成注册组合
+    d = ComboDetector("alt+q")
+    d.feed("alt", 1)
+    assert d.resync_modifiers({"alt", "shift"}) is False
+
+
+def test_physical_mods_returns_modifier_subset_or_none():
+    from app.core.hotkey import physical_mods
+
+    r = physical_mods()
+    assert r is None or r <= {"ctrl", "alt", "shift", "windows"}
+
+
+def test_combo_invalid_specs_raise():
+    for bad in ("", "alt", "alt++q", "alt+alt+q", "alt+ctrl", "x+q", "  "):
+        with pytest.raises(ValueError):
+            ComboDetector(bad)
+
+
+def test_simple_hotkey_start_rejects_invalid(qapp):
+    from app.core.hotkey import SimpleHotkey
+
+    hk = SimpleHotkey()
+    assert hk.start("") is False          # 空串 = 不注册
+    assert hk.start("alt+") is False      # 残缺段
+    assert hk.start("alt+ctrl") is False  # 目标键是修饰键
+    assert hk._hook is None
+
+
+# ---------------------------------------------------------------- format_hotkey 展示规范化
+
+def test_format_hotkey_basic():
+    assert format_hotkey("alt+q") == "Alt+Q"
+    assert format_hotkey("ctrl+alt+e") == "Ctrl+Alt+E"
+    assert format_hotkey("Alt+Q") == "Alt+Q"      # 已规范的原样
+    assert format_hotkey("ctrl+shift+f1") == "Ctrl+Shift+F1"
+    assert format_hotkey("esc") == "Esc"
+    assert format_hotkey("") == ""
+
 
 def test_simple_hotkey_signal_queued_to_receiver_thread(qapp):
     """keyboard 钩子线程 emit → QObject 接收者必须排队到主线程执行。

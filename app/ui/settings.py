@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.config import PROVIDER_PRESETS
+from app.core.hotkey import format_hotkey
 from app.ui.icons import get_icon
 from app.ui.motion import animate
 from app.ui.theme import MOTION, build_qss, palette
@@ -261,8 +262,7 @@ class SettingsDialog(QDialog):
         key_row.addWidget(self.btn_eye)
 
         self.btn_test = QPushButton("测试连接")
-        self.lbl_test = QLabel("")
-        self.lbl_test.setObjectName("dim")
+        self.lbl_test = _hint("")
         self.btn_test.clicked.connect(self._test_connection)
         test_row = QHBoxLayout()
         test_row.addWidget(self.btn_test)
@@ -272,8 +272,7 @@ class SettingsDialog(QDialog):
         self.rb_concise = QRadioButton("简洁模式")
         mode = self.cfg["translate"].get("mode", "study")
         (self.rb_study if mode == "study" else self.rb_concise).setChecked(True)
-        lbl_mode_hint = QLabel("学习模式输出译文 + 专业术语表；简洁模式仅输出译文")
-        lbl_mode_hint.setObjectName("dim")
+        lbl_mode_hint = _hint("学习模式输出译文 + 专业术语表；简洁模式仅输出译文")
 
         self.ed_prompt = QPlainTextEdit(self.cfg["translate"].get("custom_prompt", ""))
         self.ed_prompt.setPlaceholderText("留空使用内置 prompt；可自定义，用 {text} 代表原文")
@@ -319,26 +318,22 @@ class SettingsDialog(QDialog):
         fb_key_row.addWidget(self.btn_fb_eye)
 
         self.btn_fb_test = QPushButton("测试备用")
-        self.lbl_fb_test = QLabel("")
-        self.lbl_fb_test.setObjectName("dim")
+        self.lbl_fb_test = _hint("")
         self.btn_fb_test.clicked.connect(self._test_fallback)
         fb_test_row = QHBoxLayout()
         fb_test_row.addWidget(self.btn_fb_test)
         fb_test_row.addWidget(self.lbl_fb_test, 1)
 
-        lbl_fb_hint = QLabel("主服务失败（网络 / 限流 / Key 失效）时自动用备用服务重试；三项填写完整后启用")
-        lbl_fb_hint.setObjectName("dim")
+        lbl_fb_hint = _hint("主服务失败（网络 / 限流 / Key 失效）时自动用备用服务重试；三项填写完整后启用")
 
         self.sp_timeout = QSpinBox()
         self.sp_timeout.setRange(10, 300)
         self.sp_timeout.setSuffix(" 秒")
         self.sp_timeout.setValue(int(self.cfg["translate"].get("timeout_s", 60)))
-        lbl_timeout_hint = QLabel("单次翻译/OCR 请求的超时上限；慢代理或长文可调大")
-        lbl_timeout_hint.setObjectName("dim")
+        lbl_timeout_hint = _hint("单次翻译/OCR 请求的超时上限；慢代理或长文可调大")
         self.ed_proxy = QLineEdit(self.cfg.get("network", {}).get("proxy", ""))
         self.ed_proxy.setPlaceholderText("http://127.0.0.1:7890 —— OpenRouter / Gemini 等需代理的服务商；留空 = 直连")
-        lbl_proxy_hint = QLabel("翻译与语音合成出站请求共用；仅支持 http(s) 代理地址")
-        lbl_proxy_hint.setObjectName("dim")
+        lbl_proxy_hint = _hint("翻译与语音合成出站请求共用；仅支持 http(s) 代理地址")
 
         main_card = self._card(vbox, "主服务（OpenAI 兼容）")
         main_card.addRow("服务商预设", self.cb_preset)
@@ -370,11 +365,9 @@ class SettingsDialog(QDialog):
         self.ck_webai = self._mk_toggle(webai.get("enabled", False))
         self.ck_auto_terms = QCheckBox("自动把【术语】段收录进生词本（网页引擎回复 + 术语解释模式）")
         self.ck_auto_terms.setChecked(webai.get("auto_terms", True))
-        lbl_webai_hint = QLabel("划词/截图改走内嵌网页版 DeepSeek，无需 API Key；"
-                                "首次使用会弹出网页窗口，登录一次长期有效，速度取决于网页服务。"
-                                "与 API 模式二选一，重试按钮跟随各自引擎。")
-        lbl_webai_hint.setObjectName("dim")
-        lbl_webai_hint.setWordWrap(True)
+        lbl_webai_hint = _hint("划词/截图改走内嵌网页版 DeepSeek，无需 API Key；"
+                               "首次使用会弹出网页窗口，登录一次长期有效，速度取决于网页服务。"
+                               "与 API 模式二选一，重试按钮跟随各自引擎。")
         web_card = self._card(vbox, "网页版引擎（免费额度）")
         web_card.addRow("启用", self.ck_webai)
         web_card.addRow("", self.ck_auto_terms)
@@ -525,22 +518,19 @@ class SettingsDialog(QDialog):
         self.cb_ocr_model.addItems(["glm-4v-flash", "glm-4v-plus", "gpt-4o-mini", "gemini-2.0-flash"])
         self.cb_ocr_model.setCurrentText(ocr.get("model", "glm-4v-flash"))
 
-        self.ed_ocr_hotkey = QLineEdit(ocr.get("hotkey", "alt+q"))
-        self.ed_ocr_hotkey.setPlaceholderText("如 alt+q；留空 = 禁用热键（仍可从托盘菜单触发）")
-        lbl_ocr_hint = QLabel("识别模型须支持图片输入；地址与 API Key 复用上方翻译服务。"
-                              "智谱 glm-4v-flash 免费，填了翻译 Key 即可直接用")
-        lbl_ocr_hint.setObjectName("dim")
+        self.ed_ocr_hotkey = QLineEdit(format_hotkey(ocr.get("hotkey", "alt+q")))
+        self.ed_ocr_hotkey.setPlaceholderText("如 Alt+Q（大小写随意）；留空 = 禁用热键（仍可从托盘菜单触发）")
+        lbl_ocr_hint = _hint("识别模型须支持图片输入；地址与 API Key 复用上方翻译服务。"
+                             "智谱 glm-4v-flash 免费，填了翻译 Key 即可直接用")
 
         # ---- 术语解释 ----
         term = self.cfg.get("term", {})
         self.ck_term = self._mk_toggle(term.get("enabled", True))
-        self.ed_term_hotkey = QLineEdit(term.get("hotkey", "alt+e"))
-        self.ed_term_hotkey.setPlaceholderText("如 alt+e；留空 = 禁用热键（仍可从托盘菜单触发截图解释）")
-        lbl_term_hint = QLabel("划词后按热键向引擎提问术语含义；未划到词自动转为框选截图。"
-                               "回答第一行是一句话通俗定义，连同关联术语自动进生词本"
-                               "（受翻译服务页「自动收录」开关控制）。提示词可在「提示词模板」页自定义。")
-        lbl_term_hint.setObjectName("dim")
-        lbl_term_hint.setWordWrap(True)
+        self.ed_term_hotkey = QLineEdit(format_hotkey(term.get("hotkey", "alt+e")))
+        self.ed_term_hotkey.setPlaceholderText("如 Alt+E（大小写随意）；留空 = 禁用热键（仍可从托盘菜单触发截图解释）")
+        lbl_term_hint = _hint("划词后按热键向引擎提问术语含义；未划到词自动转为框选截图。"
+                              "回答第一行是一句话通俗定义，连同关联术语自动进生词本"
+                              "（受翻译服务页「自动收录」开关控制）。提示词可在「提示词模板」页自定义。")
 
         sel_card = self._card(vbox, "划词翻译")
         sel_card.addRow("启用", self.ck_hotkey)
@@ -549,16 +539,14 @@ class SettingsDialog(QDialog):
 
         cap_card = self._card(vbox, "取词方式")
         cap_card.addRow("UIA 优先", self.ck_uia)
-        lbl_uia_hint = QLabel("直接读取选中，不动剪贴板；失败自动改用复制法")
-        lbl_uia_hint.setObjectName("dim")
+        lbl_uia_hint = _hint("直接读取选中，不动剪贴板；失败自动改用复制法")
         cap_card.addRow("", lbl_uia_hint)
         cap_card.addRow("复制法等待上限", self.sp_clip_wait)
         cap_card.addRow("单次翻译长度上限（字符）", self.sp_max_chars)
 
         ocr_card = self._card(vbox, "屏幕截图翻译（OCR）")
         ocr_card.addRow("启用", self.ck_ocr)
-        lbl_ocr_enable_hint = QLabel("托盘菜单 + 热键框选屏幕区域，识别并翻译图内文字")
-        lbl_ocr_enable_hint.setObjectName("dim")
+        lbl_ocr_enable_hint = _hint("托盘菜单 + 热键框选屏幕区域，识别并翻译图内文字")
         ocr_card.addRow("", lbl_ocr_enable_hint)
         ocr_card.addRow("识别模型", self.cb_ocr_model)
         ocr_card.addRow("截图热键", self.ed_ocr_hotkey)
@@ -619,11 +607,9 @@ class SettingsDialog(QDialog):
         pr = self.cfg.setdefault("prompts", {})
         vbox, page = self._page("提示词模板")
 
-        lbl_hint = QLabel("留空 = 用内置默认模板；{text} 代表划词原文/识别出的文字。"
-                          "以下模板作用于：网页版引擎的全部请求 + 术语解释模式（两引擎通用）。"
-                          "API 模式的划词/截图翻译自定义在「翻译服务 → 自定义 Prompt」。")
-        lbl_hint.setObjectName("dim")
-        lbl_hint.setWordWrap(True)
+        lbl_hint = _hint("留空 = 用内置默认模板；{text} 代表划词原文/识别出的文字。"
+                         "以下模板作用于：网页版引擎的全部请求 + 术语解释模式（两引擎通用）。"
+                         "API 模式的划词/截图翻译自定义在「翻译服务 → 自定义 Prompt」。")
 
         self._prompt_edits: dict[str, QPlainTextEdit] = {}
         form = self._card(vbox)
@@ -663,13 +649,11 @@ class SettingsDialog(QDialog):
         self.btn_clear_cache = QPushButton("清空翻译缓存")
         self.btn_clear_cache.clicked.connect(self._clear_cache)
 
-        self.lbl_paths = QLabel("配置、数据库与日志均存于 ~/.ctrltrans/")
-        self.lbl_paths.setObjectName("dim")
+        self.lbl_paths = _hint("配置、数据库与日志均存于 ~/.ctrltrans/")
 
         card = self._card(vbox)
         card.addRow("保存历史", self.ck_history)
-        lbl_history_hint = QLabel("关闭后划词翻译不再入库；生词本不受影响")
-        lbl_history_hint.setObjectName("dim")
+        lbl_history_hint = _hint("关闭后划词翻译不再入库；生词本不受影响")
         card.addRow("", lbl_history_hint)
         card.addRow("数据位置", self.btn_open_dir)
         card.addRow("翻译缓存", self.btn_clear_cache)
@@ -712,16 +696,14 @@ class SettingsDialog(QDialog):
         self.ed_wd_dir.setPlaceholderText("远端目录名，默认 CtrlTranslate")
 
         self.btn_wd_test = QPushButton("测试连接")
-        self.lbl_wd_test = QLabel("")
-        self.lbl_wd_test.setObjectName("dim")
+        self.lbl_wd_test = _hint("")
         self.btn_wd_test.clicked.connect(self._test_webdav)
         wd_test_row = QHBoxLayout()
         wd_test_row.addWidget(self.btn_wd_test)
         wd_test_row.addWidget(self.lbl_wd_test, 1)
 
         self.btn_wd_backup = QPushButton("立即备份")
-        self.lbl_wd_backup = QLabel("")
-        self.lbl_wd_backup.setObjectName("dim")
+        self.lbl_wd_backup = _hint("")
         self.btn_wd_backup.clicked.connect(self._backup_now)
         wd_backup_row = QHBoxLayout()
         wd_backup_row.addWidget(self.btn_wd_backup)
@@ -730,15 +712,13 @@ class SettingsDialog(QDialog):
         self.btn_wd_restore = QPushButton("从备份恢复…")
         self.btn_wd_restore.clicked.connect(self._restore_now)
 
-        lbl_wd_hint = QLabel(
+        lbl_wd_hint = _hint(
             "备份内容 = 翻译历史 + 生词本（不含翻译缓存），远端为单个 backup.json，"
             "每次备份覆盖（坚果云网页端保留历史版本可回滚）。恢复是合并导入："
             "只增不删，重复条目自动跳过。\n"
             "坚果云：账户信息 → 安全选项 → 添加应用密码，密码栏填它（不是登录密码）。"
             "其他标准 WebDAV（Nextcloud / NAS）同样可用。"
         )
-        lbl_wd_hint.setObjectName("dim")
-        lbl_wd_hint.setWordWrap(True)
 
         card = self._card(vbox)
         card.addRow("服务器地址", self.ed_wd_url)
@@ -955,11 +935,11 @@ class SettingsDialog(QDialog):
         o = cfg.setdefault("ocr", {})
         o["enabled"] = self.ck_ocr.isChecked()
         o["model"] = self.cb_ocr_model.currentText().strip()
-        o["hotkey"] = self.ed_ocr_hotkey.text().strip()
+        o["hotkey"] = self.ed_ocr_hotkey.text().strip().lower()
 
         t = cfg.setdefault("term", {})
         t["enabled"] = self.ck_term.isChecked()
-        t["hotkey"] = self.ed_term_hotkey.text().strip()
+        t["hotkey"] = self.ed_term_hotkey.text().strip().lower()
 
         w = cfg.setdefault("webai", {})
         w["enabled"] = self.ck_webai.isChecked()
@@ -999,6 +979,17 @@ class SettingsDialog(QDialog):
 
 
 # ---------------------------------------------------------------- 小工具
+
+def _hint(text: str) -> QLabel:
+    """说明文字统一形态：dim 灰 + 自动换行。
+
+    不开换行的长说明会把表单最小宽度撑过滚动区视口（横向滚动又被禁用），
+    右侧内容被整体裁掉——必须每条都换行。"""
+    lbl = QLabel(text)
+    lbl.setObjectName("dim")
+    lbl.setWordWrap(True)
+    return lbl
+
 
 def _wrap_h(layout: QHBoxLayout) -> QWidget:
     w = QWidget()

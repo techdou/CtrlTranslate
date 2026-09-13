@@ -19,7 +19,7 @@ from app.core.autostart import set_enabled as set_autostart
 from app.core.backup import BackupService
 from app.core.capture import TextCaptureService, get_foreground_app
 from app.core.singleton import SingleInstance
-from app.core.hotkey import HotkeyService, SimpleHotkey
+from app.core.hotkey import HotkeyService, SimpleHotkey, format_hotkey
 from app.core.translator import Translator
 from app.core.webai import WebAIEngine
 from app.core.tts import TTSService
@@ -200,8 +200,9 @@ class CtrlApp(QObject):
         self.tray.set_webai_checked(self._webai_enabled())
         self._sync_ocr_hotkey()
         self._sync_term_hotkey()
+        self.tray.set_combo_hotkeys(*self._combo_hotkey_labels())
         self.tray.act_ocr.setEnabled(self.cfg.get("ocr", {}).get("enabled", True))
-        self.tray.act_term_ocr.setEnabled(self.cfg.get("ocr", {}).get("enabled", True))
+        self.tray.act_term_ocr.setEnabled(self.cfg.get("term", {}).get("enabled", True))
         if not self.cfg["provider"].get("api_key"):
             QTimer.singleShot(
                 900,
@@ -292,10 +293,13 @@ class CtrlApp(QObject):
         self._launch_overlay(kind="term")
 
     def _launch_overlay(self, kind: str) -> None:
-        if not self.cfg.get("ocr", {}).get("enabled", True):
+        # 开关分流：术语截图跟随 term 开关，不能被 ocr 开关误伤
+        cfg_key = "term" if kind == "term" else "ocr"
+        if not self.cfg.get(cfg_key, {}).get("enabled", True):
             return
         if self._overlay is not None:  # 已在截图流程中，忽略重复触发
             return
+        self.logger.info("screenshot overlay launched (kind=%s)", kind)
         self._task_kind = kind
         self._current_app = "OCR"
         self._current_source = "（屏幕截图）"
@@ -405,6 +409,14 @@ class CtrlApp(QObject):
         if self._overlay is not None:
             self._overlay.deleteLater()
             self._overlay = None
+
+    def _combo_hotkey_labels(self) -> tuple[str, str]:
+        """(OCR, 术语) 热键的规范化展示串；功能停用或热键留空时该侧为空串。"""
+        ocr = self.cfg.get("ocr", {})
+        term = self.cfg.get("term", {})
+        ocr_hk = format_hotkey(ocr.get("hotkey", "")) if ocr.get("enabled", True) else ""
+        term_hk = format_hotkey(term.get("hotkey", "")) if term.get("enabled", True) else ""
+        return ocr_hk, term_hk
 
     def _sync_ocr_hotkey(self) -> None:
         """按当前配置注册/注销 OCR 截图热键（空串 = 禁用）。"""
@@ -555,8 +567,9 @@ class CtrlApp(QObject):
         self.tray.set_trigger_key(new_cfg["trigger"].get("key", "ctrl"))
         self._sync_ocr_hotkey()
         self._sync_term_hotkey()
+        self.tray.set_combo_hotkeys(*self._combo_hotkey_labels())
         self.tray.act_ocr.setEnabled(new_cfg.get("ocr", {}).get("enabled", True))
-        self.tray.act_term_ocr.setEnabled(new_cfg.get("ocr", {}).get("enabled", True))
+        self.tray.act_term_ocr.setEnabled(new_cfg.get("term", {}).get("enabled", True))
         self.tray.set_webai_checked(self._webai_enabled())
 
         self.popup._apply_style()

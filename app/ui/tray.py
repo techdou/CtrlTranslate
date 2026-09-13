@@ -127,3 +127,9 @@ class TrayController(QObject):
         self.act_enable.setText(f"启用双击 {self._key_label} 取词")
         if self.act_enable.isChecked():
             self.tray.setToolTip(f"CtrlTranslate · 双击 {self._key_label} 划词翻译")
+
+    def set_combo_hotkeys(self, ocr_hotkey: str, term_hotkey: str) -> None:
+        """组合热键标注进菜单项（如「屏幕截图翻译…\tAlt+Q」）；空串 = 不显示。"""
+        self.act_ocr.setText(f"屏幕截图翻译…\t{ocr_hotkey}" if ocr_hotkey else "屏幕截图翻译…")
+        self.act_term_ocr.setText(
+            f"术语截图解释…\t{term_hotkey}" if term_hotkey else "术语截图解释…")

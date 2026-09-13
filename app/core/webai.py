@@ -173,10 +173,12 @@ class _WebAIWindow:
         class _Win(QMainWindow):
             def closeEvent(self, event):
                 # 关闭 = 裸 page = load/runJavaScript 全失能（spike v3 实证），
-                # 拦截关闭改最小化；程序退出时 QApplication 销毁不受影响
+                # 拦截关闭改隐藏：体验上等同关闭（任务栏不再占位），view/page
+                # 保留——后台收流式回复、登录态不丢，下次任务/托盘入口再弹出；
+                # 程序退出时 QApplication 销毁不受影响
                 if not getattr(self, "_allow_close", False):
                     event.ignore()
-                    self.showMinimized()
+                    self.hide()
                     return
                 super().closeEvent(event)
 
