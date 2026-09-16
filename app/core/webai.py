@@ -30,6 +30,7 @@ PAGE_LOAD_TIMEOUT_S = 30
 TASK_TIMEOUT_S = 120     # 单任务总超时（含流式）
 PASTE_SETTLE_MS = 1200   # 贴图后等缩略上传再填 prompt
 UPLOAD_VERIFY_S = 8      # 上传后等待附件就绪的上限
+INSTRUCTION_REFRESH_N = 8  # 同指令连续任务每 N 次强制重注入一次（防长会话格式漂移）
 
 
 # ---------------------------------------------------------------- 站点适配
@@ -227,6 +228,12 @@ class WebAIEngine(QObject):
         self._ns_deadline = 0.0
         self._paste_attempts = 0
         self._nav_retries = 0
+        # 指令智能注入：网页会话无 system 角色，指令只能拼在用户消息里。
+        # 每次都注入会刷屏；只注入一次长会话会漂移（spike 实测）——折中：
+        # 同指令连续任务只发原文，每 INSTRUCTION_REFRESH_N 次强制重注入。
+        self._instruction = ""       # 本任务携带的指令前缀（submit_text 传入）
+        self._last_instruction = ""  # 上一次成功发出的指令
+        self._since_inject = 0       # 距上次注入的连续裸发任务数
 
     # ---- 对外 API ----
 
@@ -235,8 +242,15 @@ class WebAIEngine(QObject):
         """有任务在途（调用方预检用，busy 时 submit 会被拒）。"""
         return self._phase not in ("idle", "ready")
 
-    def submit_text(self, text: str) -> int:
-        """提交纯文本任务（划词翻译）。返回任务号；忙时返回 -1。"""
+    def submit_text(self, text: str, instruction: str = "") -> int:
+        """提交纯文本任务（划词翻译）。返回任务号；忙时返回 -1。
+
+        instruction = 模板中 {text} 之前的指令前缀。与上次注入相同且距上次
+        注入不足 INSTRUCTION_REFRESH_N 次 → 只发原文（连续翻译不刷屏）；
+        指令变化 / 超过刷新间隔 → 指令拼在原文前重新注入。instruction 为空
+        （调用方自拼全量 payload，如术语解释模板 {text} 在中部）→ 恒定全量。
+        """
+        self._instruction = (instruction or "").strip()
         return self._submit(text, image=False)
 
     def submit_image(self, png_bytes: bytes, prompt: str) -> int:
@@ -259,6 +273,8 @@ class WebAIEngine(QObject):
         self._task += 1  # 作废在途任务
         self._stop_poll()
         self._settle_clipboard()
+        self._last_instruction = ""  # 新会话是空画布：首个任务重新注入指令
+        self._since_inject = 0
         logger.info("new session requested")
         self._phase = "loading"
         self._ns_attempted = False
@@ -337,7 +353,11 @@ class WebAIEngine(QObject):
             logger.warning("busy (%s), task dropped", self._phase)
             return -1
         self._task += 1
-        self._pending_text = text
+        self._pending_inject = bool(self._instruction) and (
+            self._instruction != self._last_instruction
+            or self._since_inject >= INSTRUCTION_REFRESH_N)
+        self._pending_text = (
+            f"{self._instruction}\n{text}" if self._pending_inject else text)
         self._pending_image = image
         self._phase = "loading"
         self._deadline = time.monotonic() + TASK_TIMEOUT_S
@@ -403,6 +423,8 @@ class WebAIEngine(QObject):
         # 销毁重建：page/view 全部弃用，下次任务走全新 _boot
         self._stop_poll()
         self._settle_clipboard()
+        self._last_instruction = ""  # 页面重建 = 新会话，指令重新注入
+        self._since_inject = 0
         if self._win is not None:
             self._win._allow_close = True
             self._win.close()
@@ -528,6 +550,13 @@ class WebAIEngine(QObject):
         if self._phase != "sending":
             return
         if r and r.get("ok"):
+            # 发送成功才推进注入状态（失败重试不算）：注入轮归零计数并记下
+            # 指令；裸发轮累加，逼近刷新间隔后由下次任务强制重注入
+            if self._pending_inject:
+                self._last_instruction = self._instruction
+                self._since_inject = 0
+            else:
+                self._since_inject += 1
             self._phase = "reading"
             self._reply_prev = ""
             self._stable = 0

@@ -152,6 +152,16 @@ def test_combo_alt_q_fires():
     ]) == 1
 
 
+def test_combo_not_fired_until_modifiers_released():
+    # 修饰键全部松开的瞬间才触发：按住 Alt 期间不触发（取词模拟的 Ctrl+C
+    # 才不会变成 Alt+Ctrl+C 而复制失败——"划了词仍降级截图"的根因）
+    d = ComboDetector("alt+q")
+    assert d.feed("alt", 1) is False
+    assert d.feed("q", 1) is False      # 命中但等待修饰键松开
+    assert d.feed("q", 0) is False
+    assert d.feed("alt", 0) is True     # Alt 松开瞬间触发
+
+
 def test_combo_fast_press_release_still_fires():
     # 快按快放（add_hotkey 查表竞态的触发场景）：状态机只吃顺序流，不受影响
     d = ComboDetector("alt+q")
@@ -175,7 +185,8 @@ def test_combo_extra_modifier_no_fire():
 
 
 def test_combo_key_repeat_fires_once():
-    # 目标键按住不放的系统重复 down 只触发一次
+    # 目标键按住不放的系统重复 down 只触发一次（重复 down 间隔远小于
+    # REPEAT_GUARD_S，不重置命中标志）
     d = ComboDetector("alt+q")
     assert combo_events(d, [
         ("alt", 1), ("q", 1), ("q", 1), ("q", 1), ("q", 0), ("alt", 0),
@@ -184,7 +195,8 @@ def test_combo_key_repeat_fires_once():
 
 def test_combo_refire_after_key_release():
     d = ComboDetector("alt+q")
-    events = [("alt", 1), ("q", 1), ("q", 0), ("q", 1)]
+    events = [("alt", 1), ("q", 1), ("q", 0), ("alt", 0),
+              ("alt", 1), ("q", 1), ("q", 0), ("alt", 0)]
     assert combo_events(d, events) == 2
 
 
@@ -204,12 +216,38 @@ def test_combo_modifier_up_before_target_no_fire():
 
 
 def test_combo_released_modifier_resets():
-    # alt↓ q↓(触发) q↑ alt↑ alt↓ q↓：再次触发
+    # alt↓ q↓(触发) q↑ alt↑ alt↓ q↓ q↑ alt↑：再次触发
     d = ComboDetector("alt+q")
     assert combo_events(d, [
         ("alt", 1), ("q", 1), ("q", 0), ("alt", 0),
-        ("alt", 1), ("q", 1),
+        ("alt", 1), ("q", 1), ("q", 0), ("alt", 0),
     ]) == 2
+
+
+def test_combo_target_up_lost_still_fires():
+    # q 的 up 事件丢失：修饰键松开时仍触发（触发判定只依赖修饰键 up）
+    d = ComboDetector("alt+q")
+    d.feed("alt", 1)
+    d.feed("q", 1)   # q up 丢失
+    assert d.feed("alt", 0) is True
+
+
+def test_combo_recovery_after_up_events_lost():
+    # alt/q 的 up 全丢失（状态卡死，旧实现热键失灵直到重启）：
+    # 300ms 后的重新按压 + 物理对齐（SimpleHotkey 在目标键 down 时调
+    # resync_modifiers）让状态机恢复
+    t = [0.0]
+    d = ComboDetector("alt+q", clock=lambda: t[0])
+    t[0] = 0.0
+    d.feed("alt", 1)
+    assert d.feed("q", 1) is False
+    # —— up 事件全部丢失，状态残留 ——
+    t[0] = 1.0  # 1s 后用户重新按完整组合
+    d.feed("alt", 1)              # 物理重按 alt（残留集合本就含 alt）
+    d.resync_modifiers({"alt"})   # SimpleHotkey 层的物理对齐
+    assert d.feed("q", 1) is False   # 间隔 > REPEAT_GUARD_S：新按压，重新命中
+    assert d.feed("q", 0) is False
+    assert d.feed("alt", 0) is True  # 状态机已恢复，正常触发
 
 
 def test_resync_drops_stale_modifier():

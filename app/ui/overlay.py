@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import QObject, QPoint, QRect, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QCursor, QImage, QPainter, QPixmap, QPen
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -106,6 +106,12 @@ class _ScreenMask(QWidget):
             self._overlay.cancel()
         else:
             super().keyPressEvent(event)
+
+    def closeEvent(self, event) -> None:
+        # 窗口被外力关闭（任务栏/系统/第三方工具）也要走 cancel——否则
+        # cancelled 信号不发，main 的 _overlay 残留，后续热键触发被静默吞
+        self._overlay.cancel()
+        super().closeEvent(event)
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
@@ -229,6 +235,22 @@ class ScreenshotOverlay(QObject):
 
     selected = Signal(bytes)   # PNG bytes（已缩放）
     cancelled = Signal()
+    _esc_global = Signal()     # keyboard 钩子线程发现的 Esc（排队回主线程）
+
+    def __init__(self, parent: QObject | None = None):
+        super().__init__(parent)
+        self._masks: list[_ScreenMask] = []
+        self._done = False
+
+    def eventFilter(self, obj, event) -> bool:
+        """全局 Esc 兜底：遮罩 activateWindow 可能被 Windows 前台锁定拒绝
+        （焦点留在原前台应用），mask 的 keyPressEvent 根本收不到 Esc——
+        挂在 qApp 上的过滤器保证 Esc 在任何焦点状态下都能取消遮罩。"""
+        if event.type() == QEvent.Type.KeyPress \
+                and event.key() == Qt.Key.Key_Escape:
+            self.cancel()
+            return True
+        return False
 
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
@@ -256,12 +278,33 @@ class ScreenshotOverlay(QObject):
                 mask.setWindowOpacity, 0.0, 1.0, MOTION["dur_mask_in"], "OutQuad")
             mask._hint_timer.start(1800)  # 提示胶囊驻留后自动淡出
             self._masks.append(mask)
-        # 键盘焦点给鼠标所在屏的遮罩，Esc 才有人接
+        # 键盘焦点给鼠标所在屏的遮罩，Esc 才有人接（焦点被前台锁定拒绝时
+        # 由 qApp 事件过滤器 + 全局键盘钩子兜底，见 eventFilter/_on_global_key）
         target = QApplication.screenAt(QCursor.pos()) or screens[0]
         for mask in self._masks:
             if mask._screen is target:
                 mask.activateWindow()
                 break
+        QApplication.instance().installEventFilter(self)
+        # 真·全局 Esc 兜底：焦点不在本应用（前台锁定拒绝 activate）时 Esc
+        # 不进 Qt 事件循环，过滤器看不到——借 keyboard 库的低级钩子直接
+        # 监听物理 Esc（注入的 Esc 无 ALTDOWN 干扰，不会被库过滤）
+        self._esc_hook = None
+        try:
+            import keyboard
+
+            self._esc_hook = keyboard.hook(self._on_global_key, suppress=False)
+        except Exception:
+            logger.warning("global esc fallback unavailable (keyboard hook failed)")
+        self._esc_global.connect(self.cancel)
+
+    def _on_global_key(self, event) -> None:
+        """keyboard 钩子线程回调：只识别 Esc down，经信号排队回主线程取消。"""
+        try:
+            if event.event_type == "down" and (getattr(event, "name", "") or "").lower() == "esc":
+                self._esc_global.emit()
+        except Exception:
+            pass
 
     def cancel(self) -> None:
         if self._done:
@@ -292,6 +335,15 @@ class ScreenshotOverlay(QObject):
             self.cancelled.emit()
 
     def _close_all(self) -> None:
+        QApplication.instance().removeEventFilter(self)
+        if getattr(self, "_esc_hook", None) is not None:
+            try:
+                import keyboard
+
+                keyboard.unhook(self._esc_hook)
+            except Exception:
+                pass
+            self._esc_hook = None
         for mask in self._masks:
             # 在途动画全部先停：否则回调打在已删除的 C++ 对象上刷 RuntimeError
             for attr in ("_fade_in", "_hint_anim", "_corner_anim"):

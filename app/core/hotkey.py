@@ -7,8 +7,9 @@
 
 组合热键（alt+q 等）由 ComboDetector 处理：与双击检测同吃 keyboard.hook
 事件流、只依赖事件顺序匹配——避开 keyboard.add_hotkey 的查表竞态（快按
-快放下组合键漏触发，表现为时灵时不灵）。SimpleHotkey 触发前用物理键态
-（GetAsyncKeyState）复核并自愈状态机，防御抬起事件丢失导致的残留误触发。
+快放下组合键漏触发，表现为时灵时不灵）。触发时机 = 修饰键全部松开（对齐
+双击检测的抬起触发，保证紧随其后的取词模拟 Ctrl+C 不被按住的修饰键污
+染）；抬起事件丢失由物理键态对齐自愈（防热键卡死直到重启）。
 
 触发键可配置：键盘钩子始终监听全部按键（feed 内过滤目标键），换键只需
 更新 detector，无需重装钩子。
@@ -72,24 +73,33 @@ class DoubleTapDetector:
 
 _MODIFIER_KEYS = {"ctrl", "alt", "shift", "windows"}
 
+# 目标键两次 down 的最小人间隔：小于它视为系统 auto-repeat（按住不放的
+# 重复 down），大于它必然是一次新的物理按压（上一次的 up 事件已丢失，
+# 状态机借此自愈，防"热键卡死直到重启"）
+REPEAT_GUARD_S = 0.3
+
 
 def is_modifier(key: str) -> bool:
     return key in _MODIFIER_KEYS
 
 
 class ComboDetector:
-    """组合热键状态机（如 alt+q）：修饰键精确按下集合 + 目标键 down 即触发。
+    """组合热键状态机（如 alt+q）：修饰键精确按下 + 目标键 down 命中，
+    **修饰键全部松开的瞬间触发**（与 DoubleTapDetector 的抬起触发对齐——
+    触发时修饰键已松开，紧随其后的取词模拟 Ctrl+C 才不会变成 Alt+Ctrl+C
+    而复制失败，这是"划了词仍降级截图"的根因）。
 
     为什么不用 keyboard.add_hotkey：它的匹配靠查询"事件被消费时刻"的共享
     按下键集合——按得快时（q down 还在队列排队、alt up 已先处理），查表
     集合里已没有 alt，匹配漏掉，表现为热键时灵时不灵。本实现与
     DoubleTapDetector 同管线只吃事件流本身（顺序 + 自家状态），无该竞态。
 
-    语义与 add_hotkey 对齐：多余修饰键不触发（alt+shift+q 不命中 alt+q）；
-    目标键按住重复 down 只触发一次，抬起后可再触发。
+    抬起事件丢失的自愈：目标键 down 间隔超过 REPEAT_GUARD_S 视为新按压
+    （清 _fired 重评）；修饰键残留由 SimpleHotkey 在目标键 down 时用物理
+    键态对齐（resync_modifiers）。多余修饰键不命中（alt+shift+q 不算 alt+q）。
     """
 
-    def __init__(self, combo: str):
+    def __init__(self, combo: str, clock=time.monotonic):
         raw = [p.strip() for p in (combo or "").split("+")]
         if not combo or not all(raw):
             raise ValueError(f"invalid combo: {combo!r}")
@@ -103,35 +113,45 @@ class ComboDetector:
         for m in self.mods:
             if not is_modifier(m):
                 raise ValueError(f"non-modifier in combo prefix: {combo!r}")
+        self._clock = clock
         self._mods_down: set[str] = set()
-        self._fired = False
+        self._fired = False        # 本轮按压已命中（防 auto-repeat 重复触发）
+        self._pending = False      # 已命中，等修饰键全部松开即触发
+        self._last_target_down = float("-inf")
 
     def resync_modifiers(self, physically_down: set[str]) -> bool:
         """用物理按下状态刷新修饰键集合，返回当前是否恰好组成注册的组合。
 
-        抬起事件极小概率丢失会让状态机残留"修饰键还按着"（之后裸按目标键
-        即误触发）；触发前用真实键盘状态对齐一次即可自愈。
+        抬起事件极小概率丢失会让状态机残留"修饰键还按着"（后续组合永不
+        命中，热键卡死直到重启）；目标键 down 时对齐一次物理真相即可自愈。
         """
         self._mods_down = {m for m in _MODIFIER_KEYS if m in physically_down}
         return self._mods_down == self.mods
 
     def feed(self, key_name: str, is_down: bool) -> bool:
-        """输入一个键盘事件；返回 True 表示本次事件命中组合热键。"""
+        """输入一个键盘事件；返回 True 表示本次事件命中组合热键（触发）。"""
         key = DoubleTapDetector.normalize(key_name)
         if is_modifier(key):
             if is_down:
                 self._mods_down.add(key)
             else:
                 self._mods_down.discard(key)
+                if self._pending and not self._mods_down:
+                    self._pending = False
+                    return True  # 修饰键全部松开：此刻触发（取词可安全模拟 Ctrl+C）
             return False
         if key != self.key:
             return False
         if is_down:
+            now = self._clock()
+            if now - self._last_target_down > REPEAT_GUARD_S:
+                self._fired = False  # 新的一次物理按压（上轮 up 已丢则借此重置）
+            self._last_target_down = now
             if self._mods_down == self.mods and not self._fired:
                 self._fired = True
-                return True
+                self._pending = True  # 命中：等修饰键全松
         else:
-            self._fired = False  # 目标键抬起后允许下一次触发
+            self._fired = False
         return False
 
 
@@ -248,18 +268,20 @@ class SimpleHotkey(QObject):
 
     def _on_event(self, event) -> None:
         try:
-            if self._detector is None or not self._detector.feed(
-                    getattr(event, "name", ""), event.event_type == "down"):
+            if self._detector is None:
                 return
-            # 触发前物理复核：状态机说命中，还要真实键盘上修饰键确实按着，
-            # 否则（抬起事件丢失导致的残留）放弃本次触发并自愈状态机
-            physical = physical_mods()
-            if physical is not None and not self._detector.resync_modifiers(physical):
-                logging.getLogger("ctrltrans.hotkey").info(
-                    "combo hit but physical mods mismatch (resynced): %s", physical)
-                return
-            logging.getLogger("ctrltrans.hotkey").info("combo hotkey fired")
-            self._fire()
+            name = getattr(event, "name", "")
+            down = event.event_type == "down"
+            if down and not is_modifier(DoubleTapDetector.normalize(name)):
+                # 目标键按下瞬间用物理键态对齐修饰键集合：抬起事件极小概率
+                # 丢失会让状态机残留"修饰键还按着"，组合永不命中（热键卡死
+                # 直到重启）；物理对齐一次即自愈。物理态是真相，提前知会无害
+                physical = physical_mods()
+                if physical is not None:
+                    self._detector.resync_modifiers(physical)
+            if self._detector.feed(name, down):
+                logging.getLogger("ctrltrans.hotkey").info("combo hotkey fired")
+                self._fire()
         except Exception:
             # 钩子线程里绝不抛异常
             logging.getLogger("ctrltrans.hotkey").exception("combo hotkey handler error")

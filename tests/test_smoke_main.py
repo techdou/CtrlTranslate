@@ -17,3 +17,25 @@ def test_ctrlapp_is_qobject():
     import main
 
     assert issubclass(main.CtrlApp, QObject)
+
+
+# ---------------------------------------------------------------- split_instruction
+
+def test_split_instruction_tail_placeholder():
+    from main import split_instruction
+
+    ins, ok = split_instruction("请将下面的文字翻译成中文。\n\n{text}")
+    assert (ins, ok) == ("请将下面的文字翻译成中文。", True)
+    # {text} 后仅余空白也算末尾
+    ins, ok = split_instruction("翻译：{text}  ")
+    assert (ins, ok) == ("翻译：", True)
+
+
+def test_split_instruction_rejects_non_tail():
+    from main import split_instruction
+
+    # {text} 在中部（术语解释模板形态）：不可拆，调用方退回全量注入
+    assert split_instruction("解释「{text}」是什么")[1] is False
+    # 缺失 / 重复占位符：不可拆
+    assert split_instruction("无占位符")[1] is False
+    assert split_instruction("{text}和{text}")[1] is False

@@ -267,4 +267,73 @@ def test_fail_routes_pending_upload_even_in_loading(engine, qapp):
 
 
 def test_new_session_returns_false_when_not_booted(engine):
-    assert engine.new_session() is False
+    from app.core.webai import WebAIEngine
+
+    assert WebAIEngine().new_session() is False
+
+
+# ---------------------------------------------------------------- 指令智能注入
+
+def test_instruction_injected_on_first_task(engine):
+    engine.submit_text("hello", instruction="请翻译成中文")
+    assert engine._pending_inject is True
+    assert engine._pending_text == "请翻译成中文\nhello"
+
+
+def test_same_instruction_second_task_sends_bare(engine):
+    # 模拟首轮已发送成功（_on_sent 的推进效果）
+    engine._last_instruction = "请翻译成中文"
+    engine._since_inject = 0
+    engine.submit_text("world", instruction="请翻译成中文")
+    assert engine._pending_inject is False
+    assert engine._pending_text == "world"
+
+
+def test_changed_instruction_reinjects(engine):
+    engine._last_instruction = "请翻译成中文"
+    engine._since_inject = 0
+    engine.submit_text("backprop", instruction="解释术语")
+    assert engine._pending_inject is True
+    assert engine._pending_text.startswith("解释术语\n")
+
+
+def test_refresh_interval_forces_reinject(engine):
+    from app.core.webai import INSTRUCTION_REFRESH_N
+
+    engine._last_instruction = "请翻译成中文"
+    engine._since_inject = INSTRUCTION_REFRESH_N  # 裸发次数到顶：强制重注入
+    engine.submit_text("hello", instruction="请翻译成中文")
+    assert engine._pending_inject is True
+
+
+def test_no_instruction_always_full_payload(engine):
+    # instruction 为空（术语解释等 {text} 在中部的模板）＝ 调用方全量拼好
+    engine._last_instruction = "请翻译成中文"
+    engine.submit_text("解释「术语」…")
+    assert engine._pending_inject is False
+    assert engine._pending_text == "解释「术语」…"
+
+
+def test_sent_success_advances_injection_state(engine):
+    engine._pending_inject = True
+    engine._instruction = "请翻译成中文"
+    engine._phase = "sending"
+    engine._on_sent({"ok": True})
+    assert engine._last_instruction == "请翻译成中文"
+    assert engine._since_inject == 0
+    # 裸发成功：计数 +1
+    engine._pending_inject = False
+    engine._phase = "sending"
+    engine._on_sent({"ok": True})
+    assert engine._since_inject == 1
+
+
+def test_new_session_resets_instruction_state(engine):
+    from unittest.mock import MagicMock
+
+    engine._page = MagicMock()
+    engine._last_instruction = "请翻译成中文"
+    engine._since_inject = 3
+    engine.new_session()
+    assert engine._last_instruction == ""
+    assert engine._since_inject == 0

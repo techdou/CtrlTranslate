@@ -34,10 +34,11 @@ from app.ui.settings import SettingsDialog
 from app.ui.theme import build_qss, palette
 from app.ui.tray import TrayController
 
-# 网页模式注入指令：网页会话无 system 角色，指令拼在用户消息前、跟随每次
-# 请求注入（长会话下首条指令会漂移——spike 实测）。学习版要求「【术语】」段，
-# 与 API 模式学习模式的术语解析格式对齐（vocabulary.parse_terms），网页模式
-# 完成后据此自动归档术语到生词本。
+# 网页模式注入指令：网页会话无 system 角色，指令拼在用户消息前注入。
+# 首条指令只发一次长会话会漂移（spike 实测），每次都注入又刷屏——现为
+# 智能注入（WebAIEngine）：同指令连续任务只发原文，每 N 次强制重注入。
+# 学习版要求「【术语】」段，与 API 模式学习模式的术语解析格式对齐
+# （vocabulary.parse_terms），网页模式完成后据此自动归档术语到生词本。
 WEBAI_OCR_PROMPT = (
     "识别图片中的文字并翻译成中文，只输出译文。若含专业术语，在译文后另起"
     "「【术语】」段落，每行一条，格式：术语 — 中文解释。"
@@ -75,6 +76,21 @@ def resolve_prompt(cfg: dict, key: str, default: str) -> str:
     """按模板键取用户自定义 prompt，留空回退内置默认（纯函数便于单测）。"""
     custom = (cfg.get("prompts", {}).get(key) or "").strip()
     return custom or default
+
+
+def split_instruction(tpl: str) -> tuple[str, bool]:
+    """拆出模板中 {text} 之前的指令前缀（纯函数便于单测）。
+
+    网页翻译任务借此实现指令智能注入（同指令连续任务只发原文）。
+    仅当模板恰含一个 {text} 且位于末尾时可拆；{text} 在中部（如术语解释
+    模板「术语『{text}』」）或缺失时不可拆，调用方退回每次全量注入。
+    """
+    if tpl.count("{text}") != 1:
+        return "", False
+    head, _, tail = tpl.partition("{text}")
+    if tail.strip():
+        return "", False
+    return head.strip(), True
 
 
 def load_icon() -> QIcon:
@@ -262,12 +278,18 @@ class CtrlApp(QObject):
             self.tray.notify("网页翻译", "上一条还在处理，请稍候再试", 4)
             return
         # 网页会话无 system 角色：翻译指令拼进 payload 随消息注入；
-        # source 保持原文用于历史记录与术语归档的上下文
+        # source 保持原文用于历史记录与术语归档的上下文。
+        # 指令智能注入：模板可拆时把指令前缀单独交给引擎——同指令连续
+        # 划词只发原文（页面不刷屏），每 N 次由引擎强制重注入防格式漂移
         mode = self.cfg.get("translate", {}).get("mode", "study")
         tpl = (resolve_prompt(self.cfg, "translate_study", WEBAI_TRANSLATE_PROMPT)
                if mode == "study"
                else resolve_prompt(self.cfg, "translate_concise", WEBAI_TRANSLATE_PROMPT_CONCISE))
-        self._pipeline_task = self.webai.submit_text(tpl.format(text=text))
+        instruction, splittable = split_instruction(tpl)
+        if splittable:
+            self._pipeline_task = self.webai.submit_text(text, instruction=instruction)
+        else:
+            self._pipeline_task = self.webai.submit_text(tpl.format(text=text))
 
     def _start_term(self, text: str, method: str) -> None:
         """术语解释（划词）：payload=术语解释模板；API 引擎走 raw（不套翻译 system）。"""
@@ -298,6 +320,7 @@ class CtrlApp(QObject):
         if not self.cfg.get(cfg_key, {}).get("enabled", True):
             return
         if self._overlay is not None:  # 已在截图流程中，忽略重复触发
+            self.logger.warning("overlay trigger ignored: previous overlay still alive (kind=%s)", kind)
             return
         self.logger.info("screenshot overlay launched (kind=%s)", kind)
         self._task_kind = kind
@@ -407,6 +430,7 @@ class CtrlApp(QObject):
 
     def _discard_overlay(self) -> None:
         if self._overlay is not None:
+            self.logger.info("overlay discarded")
             self._overlay.deleteLater()
             self._overlay = None
 
