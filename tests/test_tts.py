@@ -1,5 +1,7 @@
 """TTS 纯函数单测：语速换算 + 自定义引擎请求组装 + 语言检测。"""
 
+import pytest
+
 from app.core.tts import _custom_request, _detect_lang, _rate_to_speed
 from app.config import DATA_DIR
 
@@ -72,3 +74,33 @@ def test_custom_request_cache_key_separates_inputs():
     r3 = _custom_request(dict(CUSTOM, model="other"), "+0%", "a")
     assert r1[1] != r2[1]   # 文本不同
     assert r1[1] != r3[1]   # 模型不同
+
+
+# ---------------------------------------------------------------- SAPI 中断旗标
+
+@pytest.fixture()
+def qapp():
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    yield app
+
+
+def test_stop_sets_sapi_stop_flag(qapp):
+    """stop() 只置旗标（worker 线程内消费）——主线程不再跨套间调 COM Skip。"""
+    from app.core.tts import TTSService
+
+    svc = TTSService(lambda: {})
+    assert svc._sapi_stop is False
+    svc.stop()
+    assert svc._sapi_stop is True
+
+
+def test_speak_clears_stale_stop_flag(qapp):
+    """新播报不被上一轮的中断请求立即掐断：speak 先 stop 再清旗标。"""
+    from app.core.tts import TTSService
+
+    svc = TTSService(lambda: {"tts": {"enabled": False}})   # disabled：不起线程
+    svc._sapi_stop = True
+    svc.speak("hello")
+    assert svc._sapi_stop is False

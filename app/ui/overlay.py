@@ -252,11 +252,6 @@ class ScreenshotOverlay(QObject):
             return True
         return False
 
-    def __init__(self, parent: QObject | None = None):
-        super().__init__(parent)
-        self._masks: list[_ScreenMask] = []
-        self._done = False
-
     def show(self) -> None:
         screens = QApplication.screens()
         if not screens:  # 理论上不会发生

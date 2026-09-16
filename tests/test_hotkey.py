@@ -232,6 +232,44 @@ def test_combo_target_up_lost_still_fires():
     assert d.feed("alt", 0) is True
 
 
+# ---------------------------------------------------------------- _pending 时效（防幽灵触发）
+
+def test_combo_stale_pending_no_ghost_fire():
+    # 修饰键 up 丢失 → _pending 陈旧驻留；物理对齐清了 mods_down 后，
+    # 松开无关修饰键（如打完大写字母松 Shift）不得凭空触发截图/翻译
+    t = [0.0]
+    d = ComboDetector("alt+q", clock=lambda: t[0])
+    d.feed("alt", 1)
+    d.feed("q", 1)              # 命中，_pending 置位；alt up 丢失
+    t[0] = 5.0                  # 5s 后用户裸按 q（SimpleHotkey 物理对齐发生）
+    d.resync_modifiers(set())   # mods_down 清空，但 _pending 仍残留
+    assert d.feed("q", 1) is False
+    assert d.feed("q", 0) is False
+    assert d.feed("shift", 1) is False
+    assert d.feed("shift", 0) is False   # 不得幽灵触发
+
+
+def test_combo_pending_fires_within_expiry():
+    # 时效窗口内（2s）等到了修饰键松开：正常触发
+    t = [0.0]
+    d = ComboDetector("alt+q", clock=lambda: t[0])
+    d.feed("alt", 1)
+    d.feed("q", 1)
+    t[0] = 1.0
+    d.feed("q", 0)
+    assert d.feed("alt", 0) is True
+
+
+def test_combo_pending_expiry_boundary():
+    # 恰好压线超时：作废不触发
+    t = [0.0]
+    d = ComboDetector("alt+q", clock=lambda: t[0])
+    d.feed("alt", 1)
+    d.feed("q", 1)
+    t[0] = 2.1                  # > PENDING_EXPIRE_S
+    assert d.feed("alt", 0) is False
+
+
 def test_combo_recovery_after_up_events_lost():
     # alt/q 的 up 全丢失（状态卡死，旧实现热键失灵直到重启）：
     # 300ms 后的重新按压 + 物理对齐（SimpleHotkey 在目标键 down 时调

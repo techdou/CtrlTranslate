@@ -15,6 +15,7 @@ import asyncio
 import hashlib
 import logging
 import threading
+import time
 
 from PySide6.QtCore import QObject, QUrl, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
@@ -39,7 +40,7 @@ class TTSService(QObject):
         self._player.setAudioOutput(self._audio_out)
         self._player.playbackStateChanged.connect(self._on_playback_state)
         self.play_requested.connect(self._play_file)
-        self._sapi_voice = None
+        self._sapi_stop = False  # SAPI 异步朗读的中断旗标（worker 线程内消费）
 
     # ---------------------------------------------------------------- API
 
@@ -49,6 +50,7 @@ class TTSService(QObject):
         if not text:
             return
         self.stop()
+        self._sapi_stop = False  # 清掉上一轮的中断请求，新播报不被立即掐断
         cfg = self._cfg_getter().get("tts", {})
         if not cfg.get("enabled", True):
             return
@@ -57,12 +59,9 @@ class TTSService(QObject):
 
     def stop(self) -> None:
         self._player.stop()
-        voice = self._sapi_voice
-        if voice is not None:
-            try:
-                voice.Skip("Sentence", 10_000_000)  # 跳到结尾，中断同步朗读
-            except Exception:
-                pass
+        # SAPI 的 Skip 只在 worker 线程内调（同套间）——主线程跨套间调 COM
+        # 方法在对方阻塞时会连带冻结主线程
+        self._sapi_stop = True
 
     # ---------------------------------------------------------------- 合成与播放
 
@@ -155,20 +154,33 @@ class TTSService(QObject):
     # ---------------------------------------------------------------- SAPI 兜底
 
     def _sapi_speak(self, text: str, lang: str) -> None:
+        """SAPI 离线兜底：worker 线程内初始化 COM、异步朗读 + 轮询中断旗标。
+
+        两个历史缺陷一并修掉：裸线程不 CoInitialize 时 Dispatch 必败（兜底
+        从未真正生效过）；stop() 曾从主线程跨套间调 voice.Skip——对方 STA
+        阻塞在朗读里时主线程会被连带冻结。
+        """
         try:
+            import pythoncom
             import win32com.client
 
-            voice = win32com.client.Dispatch("SAPI.SpVoice")
-            self._sapi_voice = voice
-            _select_sapi_voice(voice, lang)
-            self.state_changed.emit("playing")
-            voice.Speak(text[:SAPI_TEXT_LIMIT], 0)  # 同步朗读，可被 stop() 打断
-            self.state_changed.emit("idle")
+            pythoncom.CoInitialize()
+            try:
+                voice = win32com.client.Dispatch("SAPI.SpVoice")
+                _select_sapi_voice(voice, lang)
+                self.state_changed.emit("playing")
+                voice.Speak(text[:SAPI_TEXT_LIMIT], 1)  # SVSFlagsAsync：立即返回
+                while voice.Status.RunningState == 2:   # SRSEIsSpeaking
+                    if self._sapi_stop:
+                        voice.Skip("Sentence", 10_000_000)  # 同套间调用，立即打断
+                        break
+                    time.sleep(0.05)
+                self.state_changed.emit("idle")
+            finally:
+                pythoncom.CoUninitialize()
         except Exception as e:
             logger.warning("SAPI 播报失败：%s", e)
             self.state_changed.emit(f"error:{e}")
-        finally:
-            self._sapi_voice = None
 
 
 def _parse_volume(spec: str) -> float:

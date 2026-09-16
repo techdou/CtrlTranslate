@@ -3,9 +3,11 @@
 两级策略：
 1. UIA（UI Automation TextPattern.GetSelection）——不动剪贴板，Chromium 系
    浏览器等可用；部分 PDF 阅读器不支持。
-2. 剪贴板模拟——模拟 Ctrl+C 复制选中文本再读剪贴板，几乎万能；期间完整
-   保存/恢复剪贴板（文本、HTML、DIB 位图等），不破坏用户剪贴板。
-   注：文件列表（CF_HDROP）暂不恢复，划词场景几乎不涉及。
+2. 剪贴板模拟——模拟 Ctrl+C 复制选中文本再读剪贴板，几乎万能；期间保存/
+   恢复剪贴板白名单格式（文本、DIB 位图、文件列表），尽量不破坏用户剪贴板。
+   注：只快照白名单格式——私有/注册格式（Office 的 Embed Source 等）常带
+   延迟渲染，GetClipboardData 会同步等属主进程渲染，属主挂起时无限期阻塞
+   （生产日志实证：取词线程挂死 → _busy 永真 → 热键全灭直到重启）。
 
 仅支持 Windows。
 """
@@ -16,6 +18,7 @@ import ctypes
 import ctypes.wintypes as wt
 import logging
 import re
+import threading
 import time
 
 from PySide6.QtCore import QObject, Signal
@@ -25,8 +28,13 @@ logger = logging.getLogger("ctrltrans.capture")
 CF_UNICODETEXT = 13
 CF_DIB = 8
 CF_DIBV5 = 17
+CF_HDROP = 15
 GMEM_MOVEABLE = 0x0002
 GMEM_ZEROINIT = 0x0040
+
+# 快照白名单：只读写已知会立即渲染的标准格式。私有/注册格式不碰——
+# GetClipboardData 对延迟渲染格式会跨进程同步等属主渲染，无超时上限
+SNAPSHOT_FORMATS = frozenset({CF_UNICODETEXT, CF_DIB, CF_DIBV5, CF_HDROP})
 
 _user32 = ctypes.windll.user32
 _kernel32 = ctypes.windll.kernel32
@@ -101,13 +109,22 @@ def _merge_line(acc: str, nxt: str) -> str:
 
 # ---------------------------------------------------------------- UIA 取词
 
-def uia_get_selection(timeout_s: float = 0.8) -> str:
+def uia_get_selection() -> str:
+    """UIA 取词：焦点控件的 TextPattern.GetSelection。
+
+    注意：这些是跨进程 COM 调用，目标应用无响应时可长时间阻塞且无法在线程内
+    打断（UIA 超时参数管不到属性请求）——调用方在独立 daemon 线程里跑，
+    挂死由 TextCaptureService 的 busy 看门狗兜底（功能自愈，线程随进程去）。
+    """
     try:
         import uiautomation as auto
     except Exception:
         return ""
     try:
-        el = auto.GetFocusedElement(timeout=int(timeout_s * 1000))
+        # uiautomation 2.0.29 的模块级 API 是 GetFocusedControl（历史上这里
+        # 误写成不存在的 GetFocusedElement，AttributeError 被吞导致 UIA 路径
+        # 从未生效，所有取词都退化到剪贴板模拟）
+        el = auto.GetFocusedControl()
         if el is None:
             return ""
         pattern = el.GetPattern(auto.PatternId.TextPattern)
@@ -136,19 +153,26 @@ def _open_clipboard(retries: int = 10, delay: float = 0.04) -> bool:
 
 
 def _save_clipboard() -> list[tuple[int, str | bytes]]:
-    """快照剪贴板常见格式。返回 [(fmt, data)]；文本 str、其余 bytes。"""
+    """快照剪贴板白名单格式。返回 [(fmt, data)]；文本 str、其余 bytes。"""
     saved: list[tuple[int, str | bytes]] = []
+    skipped = 0
     if not _open_clipboard():
         return saved
     try:
         fmt = _user32.EnumClipboardFormats(0)
         while fmt:
-            data = _read_format(fmt)
-            if data is not None:
-                saved.append((fmt, data))
+            if fmt in SNAPSHOT_FORMATS:
+                data = _read_format(fmt)
+                if data is not None:
+                    saved.append((fmt, data))
+            else:
+                skipped += 1
             fmt = _user32.EnumClipboardFormats(fmt)
     finally:
         _user32.CloseClipboard()
+    if skipped:
+        logger.debug("clipboard snapshot: %d formats kept, %d skipped (non-whitelist)",
+                     len(saved), skipped)
     return saved
 
 
@@ -197,7 +221,8 @@ def _restore_clipboard(saved: list[tuple[int, str | bytes]]) -> None:
                 ctypes.memmove(ptr, payload, len(payload))
             finally:
                 _kernel32.GlobalUnlock(h)
-            _user32.SetClipboardData(fmt, h)  # 成功后系统接管内存
+            if not _user32.SetClipboardData(fmt, h):
+                _kernel32.GlobalFree(h)  # 系统未接管内存时必须自己释放，防全局堆泄漏
     finally:
         _user32.CloseClipboard()
 
@@ -256,6 +281,12 @@ def clipboard_get_selection(wait_ms: int = 400) -> str:
 
 # ---------------------------------------------------------------- 对外服务
 
+# busy 看门狗：一次取词从 UIA（跨进程 COM）到剪贴板路径理论上秒级完成；
+# 超过该时限仍在 busy，视为 worker 挂死（COM/GetClipboardData 无线程内打断
+# 手段），强制复位让热键继续可用——生产日志实证过挂死后热键全灭直到重启
+CAPTURE_WATCHDOG_S = 15.0
+
+
 def get_foreground_app() -> str:
     """前台窗口进程名（仅记录用，失败返回空串）。"""
     try:
@@ -283,7 +314,7 @@ def get_foreground_app() -> str:
 
 
 class TextCaptureService(QObject):
-    """取词服务。UIA 调用放短命线程，避免 COM 初始化/超时卡主线程。"""
+    """取词服务。UIA/剪贴板调用放短命线程，避免 COM 初始化/阻塞卡主线程。"""
 
     captured = Signal(str, str)   # (text, method)
     failed = Signal(str)
@@ -292,13 +323,19 @@ class TextCaptureService(QObject):
         super().__init__(parent)
         self._cfg_getter = cfg_getter
         self._busy = False
+        self._busy_since = 0.0
 
     def capture(self) -> None:
         if self._busy:
-            return
+            age = time.monotonic() - self._busy_since
+            if age < CAPTURE_WATCHDOG_S:
+                logger.debug("capture skipped: busy (age %.1fs)", age)
+                return
+            # 挂死的旧线程无法打断（daemon 随进程去），复位旗标让功能自愈
+            logger.warning("capture watchdog: previous run stuck %.1fs, force-reset busy", age)
+            self._busy = False
         self._busy = True
-        import threading
-
+        self._busy_since = time.monotonic()
         threading.Thread(target=self._run, daemon=True).start()
 
     def _run(self) -> None:

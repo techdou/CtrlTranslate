@@ -6,14 +6,17 @@
 from __future__ import annotations
 
 import base64
+import faulthandler
+import logging
 import sys
+import traceback
 
-from PySide6.QtCore import QObject, QTimer, QUrl
+from PySide6.QtCore import Qt, QObject, QTimer, QUrl, QtMsgType, qInstallMessageHandler
 from PySide6.QtGui import QDesktopServices, QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from app import __version__
-from app.config import load_config, save_config
+from app.config import DATA_DIR, load_config, save_config
 from app.core.autostart import is_enabled as autostart_enabled
 from app.core.autostart import set_enabled as set_autostart
 from app.core.backup import BackupService
@@ -623,10 +626,62 @@ class CtrlApp(QObject):
         self.ocr_hotkey.stop()
         self.term_hotkey.stop()
         self.tts.stop()
+        # WebEngine 对象必须在 QApplication 存活期内显式销毁——留给解释器
+        # 关闭期 GC 会在 qapp 死后析构 Chromium 对象（退出阶段 access
+        # violation，CI 曾两次复现）
+        self.webai.shutdown()
         self.qapp.quit()
 
 
+def _install_crash_guards() -> None:
+    """异常兜底三件套：excepthook / faulthandler / qInstallMessageHandler。
+
+    windowed exe 里 sys.stderr 是 None（PyInstaller 5+ 行为），PySide6 槽内
+    未捕获异常、线程异常、native 崩溃默认全部无痕蒸发——"功能莫名失灵、
+    查无实锤"的根源。全部改落 ~/.ctrltrans/logs/。"""
+    logger = setup_logger()
+
+    # 1. native 崩溃（segv / access violation）的调用栈转储
+    try:
+        log_dir = DATA_DIR / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        f = open(log_dir / "faulthandler.log", "a", encoding="utf-8")
+        faulthandler.enable(file=f)
+        globals()["_faultlog_keepalive"] = f  # 文件必须保持打开（fd 被持有）
+    except Exception:
+        logger.warning("faulthandler unavailable", exc_info=True)
+
+    # 2. 主线程/daemon 线程未捕获的 Python 异常
+    def _excepthook(exc_type, exc, tb):
+        logging.getLogger("ctrltrans.crash").error(
+            "unhandled exception: %s",
+            "".join(traceback.format_exception(exc_type, exc, tb)))
+
+    sys.excepthook = _excepthook
+
+    # 3. Qt 内部警告/错误（WebEngine 崩溃、多媒体后端失败、QObject 生命周期）
+    _qt_level = {
+        QtMsgType.QtDebugMsg: logging.DEBUG,
+        QtMsgType.QtInfoMsg: logging.INFO,
+        QtMsgType.QtWarningMsg: logging.WARNING,
+        QtMsgType.QtCriticalMsg: logging.ERROR,
+        QtMsgType.QtFatalMsg: logging.CRITICAL,
+    }
+
+    def _qt_handler(mode, context, message):
+        logging.getLogger("ctrltrans.qt").log(
+            _qt_level.get(mode, logging.WARNING),
+            "%s (%s:%s)", message, context.file, context.line)
+
+    qInstallMessageHandler(_qt_handler)
+
+
 def main() -> int:
+    _install_crash_guards()
+    # WebEngine 应用必须在 QApplication 构造前开启 GL 上下文共享（Qt 官方
+    # 要求；缺失在部分显卡驱动上表现为网页窗黑屏/僵死）。轻量版无 WebEngine
+    # 时设置无害
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
     QApplication.setApplicationName("CtrlTranslate")
     app = QApplication(sys.argv)
     app.setWindowIcon(load_icon())  # 任务栏/标题栏统一应用图标（托盘另有实例）

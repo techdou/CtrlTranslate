@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 import time
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QTimer, Signal
 
 
 class DoubleTapDetector:
@@ -78,6 +78,16 @@ _MODIFIER_KEYS = {"ctrl", "alt", "shift", "windows"}
 # 状态机借此自愈，防"热键卡死直到重启"）
 REPEAT_GUARD_S = 0.3
 
+# 命中后等待修饰键全松的时效：超时作废。修饰键 up 事件丢失时 _pending 会
+# 陈旧驻留——之后用户任意一次松开任何修饰键（如打完大写字母松 Shift）都会
+# spontaneous 触发截图/翻译（幽灵触发）
+PENDING_EXPIRE_S = 2.0
+
+# 钩子看门狗重挂周期：Windows 对回调超时的 WH_KEYBOARD_LL 会静默摘钩
+# （LowLevelHooksTimeout 机制，keyboard 库不检测不重装）——摘钩即热键全灭。
+# 周期性无条件重挂（unhook+hook 成本极低），最多丢一个周期的事件
+HOOK_REARM_MS = 60_000
+
 
 def is_modifier(key: str) -> bool:
     return key in _MODIFIER_KEYS
@@ -117,6 +127,7 @@ class ComboDetector:
         self._mods_down: set[str] = set()
         self._fired = False        # 本轮按压已命中（防 auto-repeat 重复触发）
         self._pending = False      # 已命中，等修饰键全部松开即触发
+        self._pending_since = float("-inf")  # _pending 置位时刻（时效判定用）
         self._last_target_down = float("-inf")
 
     def resync_modifiers(self, physically_down: set[str]) -> bool:
@@ -138,7 +149,10 @@ class ComboDetector:
                 self._mods_down.discard(key)
                 if self._pending and not self._mods_down:
                     self._pending = False
-                    return True  # 修饰键全部松开：此刻触发（取词可安全模拟 Ctrl+C）
+                    # 陈旧挂起（修饰键 up 丢失后残留）不作数：宁可错过一次
+                    # 触发，也不能让用户松 Shift 时凭空弹截图遮罩
+                    if self._clock() - self._pending_since <= PENDING_EXPIRE_S:
+                        return True  # 修饰键全部松开：此刻触发（取词可安全模拟 Ctrl+C）
             return False
         if key != self.key:
             return False
@@ -150,6 +164,7 @@ class ComboDetector:
             if self._mods_down == self.mods and not self._fired:
                 self._fired = True
                 self._pending = True  # 命中：等修饰键全松
+                self._pending_since = now
         else:
             self._fired = False
         return False
@@ -182,6 +197,9 @@ class HotkeyService(QObject):
         super().__init__(parent)
         self.detector = DoubleTapDetector(target_key=key, interval_ms=interval_ms)
         self._hook = None
+        self._watchdog = QTimer(self)
+        self._watchdog.setInterval(HOOK_REARM_MS)
+        self._watchdog.timeout.connect(self._rearm)
 
     def set_interval(self, interval_ms: int) -> None:
         self.detector.interval_ms = interval_ms
@@ -202,6 +220,7 @@ class HotkeyService(QObject):
         except ImportError:
             return False
         self._hook = keyboard.hook(self._on_event, suppress=False)
+        self._watchdog.start()
         return True
 
     def stop(self) -> None:
@@ -213,6 +232,26 @@ class HotkeyService(QObject):
         except Exception:
             pass
         self._hook = None
+
+    def _rearm(self) -> None:
+        """看门狗：周期性无条件重挂钩子。
+
+        Windows 对回调超时的 LL 钩子会静默摘除且不通知（摘除即双击检测全灭，
+        进程还在、表现为"后台卡掉"），keyboard 库自身不检测——只能靠定期
+        重挂自愈。_hook 为 None（用户禁用）时不动作。
+        """
+        if self._hook is None:
+            return
+        try:
+            import keyboard
+            keyboard.unhook(self._hook)
+        except Exception:
+            pass
+        self._hook = None
+        if self.start():
+            logging.getLogger("ctrltrans.hotkey").debug("double-tap hook re-armed (watchdog)")
+        else:
+            logging.getLogger("ctrltrans.hotkey").warning("watchdog re-arm failed")
 
     def _on_event(self, event) -> None:
         try:
@@ -235,9 +274,17 @@ class SimpleHotkey(QObject):
         super().__init__(parent)
         self._hook = None
         self._detector: ComboDetector | None = None
+        self._hotkey = ""
+        self._watchdog = QTimer(self)
+        self._watchdog.setInterval(HOOK_REARM_MS)
+        self._watchdog.timeout.connect(self._rearm)
 
-    def start(self, hotkey: str) -> bool:
-        """注册热键（如 "alt+q"）；空串或格式无效返回 False。已注册时先换绑。"""
+    def start(self, hotkey: str, quiet: bool = False) -> bool:
+        """注册热键（如 "alt+q"）；空串或格式无效返回 False。已注册时先换绑。
+
+        quiet=True 供看门狗重挂复用：降为 debug 日志（否则每分钟一条 INFO
+        刷爆 2MB 轮转日志）。
+        """
         hotkey = (hotkey or "").strip()
         self.stop()
         if not hotkey:
@@ -251,8 +298,11 @@ class SimpleHotkey(QObject):
         except ValueError:
             logging.getLogger("ctrltrans.hotkey").warning("invalid hotkey: %r", hotkey)
             return False
+        self._hotkey = hotkey
         self._hook = keyboard.hook(self._on_event, suppress=False)
-        logging.getLogger("ctrltrans.hotkey").info("combo hotkey %r registered", hotkey)
+        self._watchdog.start()
+        log = logging.getLogger("ctrltrans.hotkey")
+        (log.debug if quiet else log.info)("combo hotkey %r registered", hotkey)
         return True
 
     def stop(self) -> None:
@@ -265,6 +315,21 @@ class SimpleHotkey(QObject):
             pass
         self._hook = None
         self._detector = None
+
+    def _rearm(self) -> None:
+        """看门狗：周期性无条件重挂（防系统静默摘钩后热键全灭），见 HotkeyService。"""
+        if self._hook is None or not self._hotkey:
+            return
+        try:
+            import keyboard
+            keyboard.unhook(self._hook)
+        except Exception:
+            pass
+        self._hook = None
+        if self.start(self._hotkey, quiet=True):
+            logging.getLogger("ctrltrans.hotkey").debug("combo hook re-armed (watchdog): %s", self._hotkey)
+        else:
+            logging.getLogger("ctrltrans.hotkey").warning("watchdog re-arm failed: %s", self._hotkey)
 
     def _on_event(self, event) -> None:
         try:

@@ -337,3 +337,73 @@ def test_new_session_resets_instruction_state(engine):
     engine.new_session()
     assert engine._last_instruction == ""
     assert engine._since_inject == 0
+
+
+# ---------------------------------------------------------------- 剪贴板串行 worker（主线程零 Win32 剪贴板调用）
+
+def test_clipboard_worker_serial_and_signal_back_to_main(qapp):
+    """job 在后台线程执行、结果经 done 信号排队回主线程、顺序保序。"""
+    import threading
+    import time
+
+    from PySide6.QtCore import QThread
+
+    from app.core.webai import _ClipboardWorker
+
+    worker = _ClipboardWorker()
+    got = []
+    worker.done.connect(lambda jid, result: got.append((jid, result, QThread.currentThread())))
+
+    main_thread = QThread.currentThread()
+    worker.submit("save", lambda: [(13, "文本")])
+    worker.submit("restore", lambda: None)
+
+    deadline = time.monotonic() + 5
+    while len(got) < 2 and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
+
+    assert [g[0] for g in got] == ["save", "restore"]       # 队列保序
+    assert got[0][1] == [(13, "文本")]                      # 结果透传
+    assert all(g[2] is main_thread for g in got)            # 信号落主线程
+
+
+def test_clipboard_worker_survives_job_exception(qapp):
+    """job 抛异常不杀 worker：结果为 None，后续 job 照常。"""
+    import time
+
+    from app.core.webai import _ClipboardWorker
+
+    worker = _ClipboardWorker()
+    got = []
+    worker.done.connect(lambda jid, result: got.append((jid, result)))
+    worker.submit("bad", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    worker.submit("good", lambda: "ok")
+
+    deadline = time.monotonic() + 5
+    while len(got) < 2 and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
+
+    assert got == [("bad", None), ("good", "ok")]
+
+
+def test_on_clip_saved_phase_guard(engine, qapp):
+    """快照回调到达时任务已被作废/失败：不得再动剪贴板/窗口（无 _win 也不炸）。"""
+    engine._phase = "idle"          # 非 pasting：守卫直接返回
+    engine._paste_image = None
+    engine._on_clip_saved([(13, "文本")])   # 不应抛异常（_win 为 None）
+    assert engine._clip_saved is None       # 快照未被采用
+
+
+def test_settle_clipboard_delegates_to_worker(engine, qapp):
+    """恢复走串行 worker（异步），立即清 _clip_saved 防重复恢复。"""
+    submitted = []
+    engine._clip_worker.submit = lambda jid, fn: submitted.append(jid)
+    engine._clip_saved = [(13, "文本")]
+    engine._settle_clipboard()
+    assert submitted == ["restore"]
+    assert engine._clip_saved is None
+    # 无快照时不提交
+    engine._settle_clipboard()
+    assert submitted == ["restore"]

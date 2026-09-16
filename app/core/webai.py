@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
+import threading
 import time
 
 from PySide6.QtCore import QObject, QTimer, QUrl, Signal
@@ -192,6 +194,36 @@ class _WebAIWindow:
         return win
 
 
+class _ClipboardWorker(QObject):
+    """剪贴板快照/恢复的串行后台执行器。
+
+    GetClipboardData 对延迟渲染格式会跨进程同步等属主渲染、无超时——绝不能
+    在 Qt 主线程调（UI 事件循环会被无限期冻结）。单 worker 线程 + 队列串行：
+    同一时刻只有一个剪贴板操作在跑，save/restore 顺序天然保序；结果经 done
+    信号排队回主线程（worker 创建于主线程，具备主线程信号亲和）。
+    """
+
+    done = Signal(str, object)  # (job_id, 结果或 None)
+
+    def __init__(self, parent: QObject | None = None):
+        super().__init__(parent)
+        self._jobs: queue.Queue = queue.Queue()
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def submit(self, job_id: str, fn) -> None:
+        self._jobs.put((job_id, fn))
+
+    def _run(self) -> None:
+        while True:
+            job_id, fn = self._jobs.get()
+            try:
+                result = fn()
+            except Exception:
+                logger.exception("clipboard job %s failed", job_id)
+                result = None
+            self.done.emit(job_id, result)
+
+
 class WebAIEngine(QObject):
     """单会话串行引擎：同一时间只处理一个任务（网页会话本质串行）。
 
@@ -234,6 +266,10 @@ class WebAIEngine(QObject):
         self._instruction = ""       # 本任务携带的指令前缀（submit_text 传入）
         self._last_instruction = ""  # 上一次成功发出的指令
         self._since_inject = 0       # 距上次注入的连续裸发任务数
+        self._paste_image = None     # 待上剪贴板的截图（快照完成前暂存）
+        # 剪贴板快照/恢复全部走串行后台线程（主线程零 Win32 剪贴板调用）
+        self._clip_worker = _ClipboardWorker(self)
+        self._clip_worker.done.connect(self._on_clip_job)
 
     # ---- 对外 API ----
 
@@ -282,6 +318,30 @@ class WebAIEngine(QObject):
         self._page.load(QUrl(self.adapter.url))
         self._start_poll(self._probe_new_session)
         return True
+
+    def shutdown(self) -> None:
+        """程序退出时显式收尾：停轮询、关窗口、销毁 page/profile。
+
+        这些对象若留给解释器关闭期 GC，析构发生在 QApplication 之后——
+        Chromium 对象晚析构是退出阶段 access violation 的已知来源（CI 曾
+        两次复现）。必须在 qapp.quit() 前调用。
+        """
+        try:
+            self._stop_poll()
+            self._phase = "idle"
+            if self._win is not None:
+                self._win._allow_close = True
+                self._win.close()
+                self._win = None
+            if self._page is not None:
+                self._page.deleteLater()
+                self._page = None
+            profile = getattr(self, "_profile", None)
+            if profile is not None:
+                profile.deleteLater()
+                self._profile = None
+        except Exception:
+            logger.exception("webai shutdown error")
 
     def show_window(self) -> None:
         """手动打开网页窗口（托盘入口 / 登录引导）。"""
@@ -518,8 +578,8 @@ class WebAIEngine(QObject):
 
     def _settle_clipboard(self) -> None:
         if self._clip_saved is not None:
-            restore_clipboard(self._clip_saved)
-            self._clip_saved = None
+            snapshot, self._clip_saved = self._clip_saved, None
+            self._clip_worker.submit("restore", lambda: restore_clipboard(snapshot))
 
     # ---- 动作：填字 / 贴图 ----
 
@@ -606,14 +666,26 @@ class WebAIEngine(QObject):
         QTimer.singleShot(400, self._paste_now)
 
     def _paste_now(self) -> None:
-        import ctypes
-
         img = QImage.fromData(self._image_bytes, "PNG")
         if img.isNull():
             self._fail("截图数据无效")
             return
-        self._clip_saved = save_clipboard()
-        QGuiApplication.clipboard().setImage(img)
+        # 剪贴板快照放串行后台线程：主线程同步快照遇延迟渲染格式会被属主
+        # 进程的渲染请求无限期挂起（UI 冻结）；快照完成经信号回主线程继续
+        self._paste_image = img
+        self._clip_worker.submit("save", save_clipboard)
+
+    def _on_clip_job(self, job_id: str, result) -> None:
+        if job_id == "save":
+            self._on_clip_saved(result)
+        # "restore"：fire-and-forget，无需后续动作
+
+    def _on_clip_saved(self, snapshot) -> None:
+        """后台快照完成：置图并进入焦点校验→粘贴序列（主线程）。"""
+        if self._phase != "pasting":
+            return  # 任务已被作废/失败：图还没上剪贴板，无需恢复
+        self._clip_saved = snapshot
+        QGuiApplication.clipboard().setImage(self._paste_image)
         # keybd_event 属真实输入管线（isTrusted=true），Chromium 才接受贴图；
         # 键盘事件直达系统焦点窗口——先把 Qt 焦点给 view、JS 焦点给输入框
         self._win.setFocus()
