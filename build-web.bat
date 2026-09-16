@@ -1,6 +1,6 @@
 @echo off
-rem CtrlTranslate 完整版打包（单 exe；约 220MB）
-rem 含 WebEngine = 网页版引擎（内嵌 DeepSeek 网页翻译）可用
+rem CtrlTranslate full build - onedir via spec, with WebEngine for web mode.
+rem Optional: also builds Inno Setup installer when ISCC is on PATH.
 setlocal
 cd /d "%~dp0"
 
@@ -10,23 +10,22 @@ if not exist .venv\Scripts\pyinstaller.exe (
 )
 
 echo [build] cleaning old output...
-if exist dist\CtrlTranslate-Web.exe del dist\CtrlTranslate-Web.exe
+if exist dist\CtrlTranslate-Web rmdir /s /q dist\CtrlTranslate-Web
 
-echo [build] building CtrlTranslate-Web.exe (full, with WebEngine) ...
-.venv\Scripts\pyinstaller ^
-    --noconfirm --clean ^
-    --windowed --onefile ^
-    --name CtrlTranslate-Web ^
-    --icon assets\icon.ico ^
-    --add-data "assets\icon.png;assets" ^
-    --hidden-import comtypes.stream ^
-    --collect-submodules edge_tts ^
-    --exclude-module PyQt5 ^
-    --exclude-module tkinter ^
-    main.py || goto :fail
+echo [build] building CtrlTranslate-Web - full, onedir ...
+.venv\Scripts\pyinstaller --noconfirm --clean CtrlTranslate-Web.spec || goto :fail
+if not exist dist\CtrlTranslate-Web\CtrlTranslate-Web.exe goto :fail
+echo [build] done: dist\CtrlTranslate-Web\CtrlTranslate-Web.exe
 
-echo.
-echo [build] done: dist\CtrlTranslate-Web.exe
+where iscc >nul 2>nul
+if errorlevel 1 (
+    echo [build] ISCC not found, skip installer - install Inno Setup to enable
+    exit /b 0
+)
+for /f %%v in ('.venv\Scripts\python -c "from app import __version__; print(__version__)"') do set APPVER=%%v
+echo [build] building installer v%APPVER% ...
+iscc /DAppVersion=%APPVER% /DVariant=web installer\installer.iss || goto :fail
+echo [build] installer: dist\installer\CtrlTranslate-Web-Setup-%APPVER%.exe
 exit /b 0
 
 :fail

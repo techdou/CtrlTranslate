@@ -34,3 +34,32 @@ jobs:
             Write-Host "::warning::pytest attempt $i exited $LASTEXITCODE（teardown 偶发崩溃），重试"
           }
           exit $LASTEXITCODE
+
+  # 构建冒烟 canary：lite 变体 onedir 构建通过才放行（防 spec/入口腐烂；
+  # Web 变体体积大、耗时，留给 release.yml 全量构建）
+  build-canary:
+    runs-on: windows-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pyinstaller
+
+      - name: Build lite variant (onedir)
+        run: python -m PyInstaller --noconfirm --clean CtrlTranslate.spec
+
+      - name: Sanity check
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist\CtrlTranslate\CtrlTranslate.exe")) {
+            throw "missing build output: dist\CtrlTranslate\CtrlTranslate.exe"
+          }
+          if (-not (Get-ChildItem "dist\CtrlTranslate" -Filter "Qt6Core*.dll")) {
+            throw "Qt DLLs missing from onedir output"
+          }

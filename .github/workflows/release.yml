@@ -1,0 +1,128 @@
+name: release
+
+# 发版 workflow：打 tag 触发 → 质量门禁 → 双变体 onedir 构建 → Inno Setup
+# 安装包 + 便携 zip → 上传 GitHub Release（共 4 资产）
+#
+# 发版流程（版本号 bump 必须在打 tag 之前完成）：
+#   1. 改 app/__init__.py 的 __version__
+#   2. git commit && git tag v1.5.2 && git push origin main v1.5.2
+#   3. 本 workflow 自动产出：CtrlTranslate-Setup-*.exe（轻量安装包）
+#      CtrlTranslate-Web-Setup-*.exe（完整安装包）+ 两个便携 zip
+#
+# workflow_dispatch 手动触发时 inputs.tagName 对应的 tag 必须已推送到远端
+# （release 用 gh CLI 挂在真实 tag 上，不凭空造 tag）。
+#
+# 与 tests.yml 区别：tests.yml 每次 push/PR 跑（pytest + lite 构建冒烟），
+# release.yml 只在打 tag 时跑（全量产物 + 上传）。
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tagName:
+        description: '发布 tag（形如 v1.5.2，须已推送）'
+        required: true
+        type: string
+
+permissions:
+  contents: write   # gh release 创建/上传需要写权限
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"  # 与 tests.yml/开发环境一致
+          cache: pip
+
+      # 质量门 1：tag 与代码版本一致——"bump 在构建后"曾导致发过错误版本号
+      # （app/__init__.py 无三方依赖，装依赖前即可校验）
+      - name: Version gate (tag == app.__version__)
+        shell: bash
+        run: |
+          TAG="${{ inputs.tagName || github.ref_name }}"
+          PYVER=$(python -c "from app import __version__; print(__version__)")
+          if [[ "v$PYVER" != "$TAG" ]]; then
+            echo "::error::tag $TAG 与 app/__version__=$PYVER 不一致——先 bump 版本号再打 tag"
+            exit 1
+          fi
+          echo "APP_VERSION=$PYVER" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG=$TAG" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest pyinstaller
+
+      # 质量门 2：测试全绿才打包（重试防 PySide6 退出阶段偶发崩溃，同 tests.yml）
+      - name: Test gate
+        shell: pwsh
+        run: |
+          for ($i = 1; $i -le 3; $i++) {
+            python -m pytest tests/ -q
+            if ($LASTEXITCODE -eq 0) { exit 0 }
+            Write-Host "::warning::pytest attempt $i exited $LASTEXITCODE（teardown 偶发崩溃），重试"
+          }
+          exit $LASTEXITCODE
+
+      - name: Build lite variant (onedir)
+        run: python -m PyInstaller --noconfirm --clean CtrlTranslate.spec
+
+      - name: Build web variant (onedir)
+        run: python -m PyInstaller --noconfirm --clean CtrlTranslate-Web.spec
+
+      - name: Sanity check build outputs
+        shell: pwsh
+        run: |
+          foreach ($p in @("dist\CtrlTranslate\CtrlTranslate.exe",
+                           "dist\CtrlTranslate-Web\CtrlTranslate-Web.exe",
+                           "dist\CtrlTranslate-Web\_internal\PySide6\QtWebEngineProcess.exe",
+                           "dist\CtrlTranslate-Web\_internal\PySide6\resources\icudtl.dat")) {
+            if (-not (Test-Path $p)) { throw "missing build output: $p" }
+          }
+
+      - name: Install Inno Setup
+        run: choco install -y innosetup
+
+      - name: Build installers
+        shell: pwsh
+        run: |
+          $iscc = Get-Command iscc -ErrorAction SilentlyContinue
+          if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\iscc.exe" }
+          & $iscc "/DAppVersion=$env:APP_VERSION" /DVariant=lite installer\installer.iss
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          & $iscc "/DAppVersion=$env:APP_VERSION" /DVariant=web installer\installer.iss
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Build portable zips
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist\CtrlTranslate -DestinationPath "dist\CtrlTranslate-Portable-$env:APP_VERSION.zip"
+          Compress-Archive -Path dist\CtrlTranslate-Web -DestinationPath "dist\CtrlTranslate-Web-Portable-$env:APP_VERSION.zip"
+
+      # gh CLI 为 runner 预装，避免引入第三方 release action 的供应链面
+      - name: Upload release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          if ! gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" \
+              --title "$RELEASE_TAG — CtrlTranslate" --generate-notes --verify-tag
+          fi
+          gh release upload "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" \
+            "dist/installer/CtrlTranslate-Setup-$APP_VERSION.exe" \
+            "dist/installer/CtrlTranslate-Web-Setup-$APP_VERSION.exe" \
+            "dist/CtrlTranslate-Portable-$APP_VERSION.zip" \
+            "dist/CtrlTranslate-Web-Portable-$APP_VERSION.zip" \
+            --clobber

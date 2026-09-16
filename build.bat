@@ -1,6 +1,6 @@
 @echo off
-rem CtrlTranslate 轻量版打包（单 exe，无控制台窗口；约 70MB）
-rem 不含 WebEngine（网页版引擎在此构建中禁用并给出指引）——需要网页版用 build-web.bat
+rem CtrlTranslate lite build - onedir via spec, no WebEngine.
+rem Optional: also builds Inno Setup installer when ISCC is on PATH.
 setlocal
 cd /d "%~dp0"
 
@@ -10,27 +10,22 @@ if not exist .venv\Scripts\pyinstaller.exe (
 )
 
 echo [build] cleaning old output...
-if exist dist\CtrlTranslate.exe del dist\CtrlTranslate.exe
+if exist dist\CtrlTranslate rmdir /s /q dist\CtrlTranslate
 
-echo [build] building CtrlTranslate.exe (light, no WebEngine) ...
-.venv\Scripts\pyinstaller ^
-    --noconfirm --clean ^
-    --windowed --onefile ^
-    --name CtrlTranslate ^
-    --icon assets\icon.ico ^
-    --add-data "assets\icon.png;assets" ^
-    --hidden-import comtypes.stream ^
-    --collect-submodules edge_tts ^
-    --exclude-module PyQt5 ^
-    --exclude-module tkinter ^
-    --exclude-module PySide6.QtWebEngineCore ^
-    --exclude-module PySide6.QtWebEngineWidgets ^
-    --exclude-module PySide6.QtWebEngineQuick ^
-    --exclude-module PySide6.QtWebChannel ^
-    main.py || goto :fail
+echo [build] building CtrlTranslate - lite, onedir ...
+.venv\Scripts\pyinstaller --noconfirm --clean CtrlTranslate.spec || goto :fail
+if not exist dist\CtrlTranslate\CtrlTranslate.exe goto :fail
+echo [build] done: dist\CtrlTranslate\CtrlTranslate.exe
 
-echo.
-echo [build] done: dist\CtrlTranslate.exe
+where iscc >nul 2>nul
+if errorlevel 1 (
+    echo [build] ISCC not found, skip installer - install Inno Setup to enable
+    exit /b 0
+)
+for /f %%v in ('.venv\Scripts\python -c "from app import __version__; print(__version__)"') do set APPVER=%%v
+echo [build] building installer v%APPVER% ...
+iscc /DAppVersion=%APPVER% /DVariant=lite installer\installer.iss || goto :fail
+echo [build] installer: dist\installer\CtrlTranslate-Setup-%APPVER%.exe
 exit /b 0
 
 :fail

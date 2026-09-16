@@ -31,19 +31,21 @@
 
 ## 快速开始
 
-### 方式一：直接下载（推荐）
+### 方式一：安装包（推荐）
 
-从 [Releases](https://github.com/techdou/CtrlTranslate/releases/latest) 下载单文件免安装 exe，双击运行，程序常驻系统托盘（可能被折叠到托盘溢出区）：
+从 [Releases](https://github.com/techdou/CtrlTranslate/releases/latest) 下载安装包，双击安装（可自选安装目录，附开始菜单快捷方式与卸载器）：
 
-- `CtrlTranslate.exe`——轻量版（约 70 MB）：API 模式（需自备 API Key，智谱 GLM Flash 免费）
-- `CtrlTranslate-Web.exe`——完整版（约 220 MB）：额外支持网页版引擎（免 API Key 用 DeepSeek 网页免费额度）
+- `CtrlTranslate-Setup-*.exe`——轻量版：API 模式（需自备 API Key，智谱 GLM Flash 免费）
+- `CtrlTranslate-Web-Setup-*.exe`——完整版：额外支持网页版引擎（免 API Key 用 DeepSeek 网页免费额度）
 
-自行打包（双构建：轻量版约 70MB 不含网页组件；完整版约 220MB 支持网页版引擎）：
+也提供免安装的**便携版 zip**（解压即用，适合 U 盘/临时环境）。配置与数据统一存放在 `~/.ctrltrans`，覆盖升级、换装便携版互不影响。
+
+自行打包（onedir 目录构建；装了 [Inno Setup](https://jrsoftware.org/isinfo.php) 会顺带产出安装包到 `dist\installer\`）：
 
 ```bat
 pip install -r requirements.txt pyinstaller
-build.bat          :: 轻量版 → dist\CtrlTranslate.exe
-build-web.bat      :: 完整版 → dist\CtrlTranslate-Web.exe
+build.bat          :: 轻量版 → dist\CtrlTranslate\ + 安装包（可选）
+build-web.bat      :: 完整版 → dist\CtrlTranslate-Web\ + 安装包（可选）
 ```
 
 ### 方式二：源码运行
@@ -108,16 +110,29 @@ app/
   ui/              # 翻译弹窗 / 截图遮罩 / 设置 / 历史生词本 / 托盘 / 主题
   db/              # SQLite 存储层
 tests/             # 单元测试（GitHub Actions 自动运行）
+installer/         # Inno Setup 安装器脚本（双变体共用）
 scripts/           # 开发辅助（端到端测试 / 截图 / 图标生成 / 剪贴板修复）
 assets/            # 应用图标 + 界面截图
 site/              # GitHub Pages 项目主页
-.github/workflows/ # CI（测试）/ Pages 部署
+.github/workflows/ # CI（测试+构建冒烟）/ 发版（tag 触发）/ Pages 部署
+```
+
+### 发版流程
+
+打 tag 触发 `release.yml` 自动构建并上传（双安装包 + 双便携 zip）。**版本号 bump 必须在打 tag 之前**——CI 有一致性门禁，tag 与 `app/__init__.py` 不符直接失败：
+
+```bat
+:: 1. bump app/__init__.py 的 __version__ 并提交
+:: 2. 打 tag 并推送（tag 形如 v1.5.2）
+git tag v1.5.2
+git push origin main v1.5.2
+:: 3. Actions 自动：版本门禁 → pytest → 双变体构建 → 安装包 → 上传 Release
 ```
 
 ## 已知边界
 
 - 仅支持 Windows（键盘钩子 / 剪贴板 / UIA / SAPI 均为 Win32 API）
-- 剪贴板恢复覆盖文本 / HTML / 位图格式；文件列表（复制文件后划词）不恢复，日常划词场景几乎不涉及
+- 剪贴板恢复只快照标准格式（文本 / 位图 / 文件列表）；HTML 与私有格式（Office 富格式等）不快照——这类格式常带延迟渲染，读取会跨进程阻塞，是取词挂死的历史根因
 
 ## 版本历史
 
