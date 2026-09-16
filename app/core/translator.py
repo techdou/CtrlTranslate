@@ -75,9 +75,18 @@ def cache_key(cfg: dict, text: str) -> str:
 
 def _make_client(endpoint: tuple[str, str, str], timeout: float, max_retries: int,
                  proxy: str = ""):
-    """OpenAI 兼容客户端；配置了代理时经 httpx2 显式走代理（GUI 启动不继承终端环境变量）。"""
+    """OpenAI 兼容客户端；配置了代理时经 httpx2 显式走代理（GUI 启动不继承终端环境变量）。
+
+    按 (endpoint, proxy, timeout, retries) 缓存复用——每次新建 client 都要
+    重新 TLS 握手，高频划词下是可感知延迟；键含全部影响连接的参数，换服务/
+    换 Key/换代理自动建新连接。"""
     from openai import OpenAI
 
+    key = (endpoint, proxy, float(timeout), int(max_retries))
+    with _client_cache_lock:
+        cached = _client_cache.get(key)
+        if cached is not None:
+            return cached
     base_url, api_key, model = endpoint
     kwargs: dict = {"base_url": base_url, "api_key": api_key,
                     "timeout": timeout, "max_retries": max_retries}
@@ -85,7 +94,15 @@ def _make_client(endpoint: tuple[str, str, str], timeout: float, max_retries: in
         import httpx2
 
         kwargs["http_client"] = httpx2.Client(proxy=proxy)
-    return OpenAI(**kwargs)
+    client = OpenAI(**kwargs)
+    with _client_cache_lock:
+        _client_cache.setdefault(key, client)  # 竞态时保留先建好的（两个都能用）
+    return client
+
+
+# 客户端缓存：键集合 = 用户历史上用过的连接配置组合，数量有限无需淘汰
+_client_cache: dict[tuple, object] = {}
+_client_cache_lock = threading.Lock()
 
 
 class Translator(QObject):

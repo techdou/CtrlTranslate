@@ -49,8 +49,12 @@ _initialized: set[str] = set()
 def _connect(db_path: Path | None = None) -> sqlite3.Connection:
     db_path = db_path or DB_PATH
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    # timeout=锁等待上限：默认 5s 会让主线程写历史时被 worker 缓存写顶住卡满
+    # 5 秒；WAL 让读写不再互斥后 2s 已是宽松兜底
+    conn = sqlite3.connect(db_path, timeout=2.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")   # 首次设置后持久化在 db 文件里，幂等
+    conn.execute("PRAGMA busy_timeout=2000")
     key = str(db_path.resolve())
     if key not in _initialized:  # 懒建表，幂等，任意入口先调也不会炸
         with _init_lock:

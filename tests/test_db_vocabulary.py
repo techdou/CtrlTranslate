@@ -104,3 +104,14 @@ def test_translation_cache_lru_trim(tmp_path: Path):
     assert database.get_cached_translation("k0004", db) is None
     assert database.get_cached_translation(f"k{database.CACHE_MAX_ROWS + 4:04d}", db) == \
         f"r{database.CACHE_MAX_ROWS + 4}"  # 最新保留
+
+
+def test_wal_mode_enabled(tmp_path: Path):
+    """WAL + busy_timeout：主线程写历史与 worker 写缓存不再互斥卡 5s。"""
+    db = tmp_path / "t.db"
+    database.init_db(db)
+    with database._connect(db) as conn:
+        mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        timeout_ms = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+    assert mode.lower() == "wal"
+    assert timeout_ms == 2000

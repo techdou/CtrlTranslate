@@ -104,3 +104,40 @@ def test_speak_clears_stale_stop_flag(qapp):
     svc._sapi_stop = True
     svc.speak("hello")
     assert svc._sapi_stop is False
+
+
+# ---------------------------------------------------------------- 缓存 LRU 清理
+
+def test_cleanup_tts_cache_deletes_oldest_beyond_cap(monkeypatch, tmp_path):
+    """目录总量超上限时按 mtime 从旧到新删，最新文件保留。"""
+    from app.core import tts as tts_mod
+
+    monkeypatch.setattr(tts_mod, "TTS_CACHE_DIR", tmp_path)
+    cap = 10 * 1024
+    # 三个 4KB 文件共 12KB > 10KB：最旧的应被删（mtime 逐个 +100s）
+    for i in range(3):
+        p = tmp_path / f"a{i}.mp3"
+        p.write_bytes(b"x" * 4096)
+        stamp = 1_000_000_000 + i * 100
+        import os
+
+        os.utime(p, (stamp, stamp))
+
+    freed = tts_mod.cleanup_tts_cache(max_bytes=cap)
+    remaining = sorted(p.name for p in tmp_path.glob("*.mp3"))
+    assert remaining == ["a1.mp3", "a2.mp3"]     # 最旧的 a0 被删
+    assert freed == 4096
+    # 未超限时零动作
+    assert tts_mod.cleanup_tts_cache(max_bytes=cap) == 0
+
+
+def test_cleanup_tts_cache_under_cap_noop(monkeypatch, tmp_path):
+    from app.core import tts as tts_mod
+
+    monkeypatch.setattr(tts_mod, "TTS_CACHE_DIR", tmp_path)
+    (tmp_path / "only.mp3").write_bytes(b"x" * 100)
+    assert tts_mod.cleanup_tts_cache(max_bytes=1024) == 0
+    assert (tmp_path / "only.mp3").exists()
+    # 目录不存在也不炸（glob 空目录）
+    monkeypatch.setattr(tts_mod, "TTS_CACHE_DIR", tmp_path / "nope")
+    assert tts_mod.cleanup_tts_cache(max_bytes=1024) == 0

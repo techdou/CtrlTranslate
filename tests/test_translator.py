@@ -24,7 +24,11 @@ def _isolate_cache(monkeypatch):
     monkeypatch.setattr(database, "get_cached_translation", lambda key: store.get(key))
     monkeypatch.setattr(database, "put_cached_translation",
                         lambda key, src, res: store.__setitem__(key, res))
-    return store
+    yield
+    # 客户端缓存也要隔离：本文件逐测试注入不同的 fake openai 模块，
+    # 复用上个测试缓存的 client 会绕过本测试的 fake 构造断言
+    from app.core import translator
+    translator._client_cache.clear()
 
 
 # ---------------------------------------------------------------- prompt
@@ -173,11 +177,16 @@ def test_new_request_cancels_old(qapp):
     def new_factory():
         return _Stream([_Event("新")])
 
-    factories = {"old": old_factory, "new": new_factory, "seq": 0}
+    factories = {"seq": 0}
+
+    def stream_factory():
+        # 按"请求"计数（create 调用），不按客户端构造——客户端已按连接
+        # 配置缓存复用，第 2 个请求可能仍用第 1 个客户端
+        factories["seq"] += 1
+        return (old_factory if factories["seq"] == 1 else new_factory)()
 
     def client_factory(**kw):
-        factories["seq"] += 1
-        return _Client(lambda: (old_factory if factories["seq"] == 1 else new_factory)())
+        return _Client(stream_factory)
 
     mod = types.ModuleType("openai")
     mod.OpenAI = client_factory
@@ -398,14 +407,17 @@ def test_dispatch_test_result_invokes_callback():
 # ---------------------------------------------------------------- 翻译缓存
 
 def test_translation_cache_hit_and_force_refresh(qapp, _isolate_cache):
-    """同文本第二次翻译命中缓存不发请求；use_cache=False 绕过强制重译。"""
+    """同文本第二次翻译命中缓存不发请求；use_cache=False 绕过强制重译。
+
+    计数在 completions.create：客户端已按连接配置缓存复用（构造器不再
+    每请求都调），请求数才是"有没有真发请求"的判据。
+    """
     calls = {"n": 0}
 
-    def openai_ctor(**kw):
-        calls["n"] += 1
-
+    def openai_ctor(**_kw):
         class _Completions:
             def create(self, **_kw):
+                calls["n"] += 1
                 return _Stream([_Event("译")])
 
         return types.SimpleNamespace(chat=types.SimpleNamespace(completions=_Completions()))
@@ -430,6 +442,32 @@ def test_translation_cache_hit_and_force_refresh(qapp, _isolate_cache):
         tr.translate("hello", use_cache=False)  # 重试路径：绕过
         assert _spin(qapp, lambda: bool(finals))
         assert calls["n"] == 2
+
+
+def test_client_cache_reuses_per_connection_config(qapp, _isolate_cache):
+    """同连接配置复用客户端；换 endpoint/代理/超时建新客户端。"""
+    from app.core.translator import _client_cache, _make_client
+
+    made = []
+
+    class _FakeOpenAI:
+        def __init__(self, **kw):
+            made.append(kw)
+
+    fake_mod = types.ModuleType("openai")
+    fake_mod.OpenAI = _FakeOpenAI
+    with mock.patch.dict(sys.modules, {"openai": fake_mod}):
+        try:
+            ep = ("https://x/v1", "sk-test", "m1")
+            a = _make_client(ep, 60, 1)
+            b = _make_client(ep, 60, 1)
+            assert a is b and len(made) == 1          # 同配置复用
+            c = _make_client(("https://y/v1", "sk-2", "m2"), 60, 1)
+            assert c is not a and len(made) == 2      # 换 endpoint 建新
+            d = _make_client(ep, 30, 1)
+            assert d is not a and len(made) == 3      # 换超时建新
+        finally:
+            _client_cache.clear()
 
 
 def test_cache_key_changes_with_translation_settings():

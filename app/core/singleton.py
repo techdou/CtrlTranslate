@@ -51,7 +51,7 @@ class SingleInstance(QObject):
         """尝试成为主实例。True = 本实例是主实例（或锁服务异常的宽容放行）。"""
         probe = QLocalSocket()
         probe.connectToServer(self._key)
-        if probe.waitForConnected(300):  # 已有实例在监听
+        if probe.waitForConnected(100):  # 已有实例在监听（等待短：本机管道即连即达）
             probe.disconnectFromServer()
             return False
         server = QLocalServer(self)
@@ -59,7 +59,7 @@ class SingleInstance(QObject):
             # 竞态：probe 与 listen 之间刚好有实例建好 server；重探一次
             probe2 = QLocalSocket()
             probe2.connectToServer(self._key)
-            if probe2.waitForConnected(300):
+            if probe2.waitForConnected(100):
                 probe2.disconnectFromServer()
                 return False
             logger.error("single-instance listen failed: %s", server.errorString())

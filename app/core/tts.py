@@ -26,6 +26,41 @@ logger = logging.getLogger("ctrltrans.tts")
 
 TTS_CACHE_DIR = DATA_DIR / "tts_cache"
 SAPI_TEXT_LIMIT = 800
+TTS_CACHE_MAX_BYTES = 200 * 1024 * 1024  # 合成缓存目录上限，超限删最旧
+
+
+def cleanup_tts_cache(max_bytes: int = TTS_CACHE_MAX_BYTES) -> int:
+    """按 mtime 从旧到新删除合成缓存，目录总量压回 max_bytes 内。返回释放字节数。
+
+    每条唯一文本一个 mp3，OCR 长译文日积月累无上限——长年使用磁盘膨胀。
+    """
+    try:
+        entries = []
+        total = 0
+        for p in TTS_CACHE_DIR.glob("*.mp3"):
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            entries.append((st.st_mtime, st.st_size, p))
+            total += st.st_size
+        if total <= max_bytes:
+            return 0
+        freed = 0
+        for _mtime, size, p in sorted(entries):  # 最旧先删
+            if total <= max_bytes:
+                break
+            try:
+                p.unlink()
+                total -= size
+                freed += size
+            except OSError:
+                pass
+        if freed:
+            logger.info("tts cache cleanup: freed %.1f MB", freed / 1024 / 1024)
+        return freed
+    except OSError:
+        return 0
 
 
 class TTSService(QObject):
@@ -41,6 +76,8 @@ class TTSService(QObject):
         self._player.playbackStateChanged.connect(self._on_playback_state)
         self.play_requested.connect(self._play_file)
         self._sapi_stop = False  # SAPI 异步朗读的中断旗标（worker 线程内消费）
+        # 启动即后台清一次缓存目录（LRU 上限）——目录扫描别卡主线程
+        threading.Thread(target=cleanup_tts_cache, daemon=True).start()
 
     # ---------------------------------------------------------------- API
 

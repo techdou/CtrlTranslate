@@ -33,6 +33,7 @@ TASK_TIMEOUT_S = 120     # 单任务总超时（含流式）
 PASTE_SETTLE_MS = 1200   # 贴图后等缩略上传再填 prompt
 UPLOAD_VERIFY_S = 8      # 上传后等待附件就绪的上限
 INSTRUCTION_REFRESH_N = 8  # 同指令连续任务每 N 次强制重注入一次（防长会话格式漂移）
+HTTP_CACHE_MAX_BYTES = 50 * 1024 * 1024  # Chromium 磁盘缓存上限（默认无界）
 
 
 # ---------------------------------------------------------------- 站点适配
@@ -448,6 +449,7 @@ class WebAIEngine(QObject):
         storage.mkdir(parents=True, exist_ok=True)
         self._profile = QWebEngineProfile("webai", self)
         self._profile.setPersistentStoragePath(str(storage))
+        self._profile.setHttpCacheMaximumSize(HTTP_CACHE_MAX_BYTES)
         self._page = _WebAIPage.make(self._profile, self)
         # 渲染进程崩溃（显存/内存/Chromium bug）→ 作废任务并重建，下次任务自愈
         self._page.renderProcessTerminated.connect(self._on_render_crash)
@@ -480,7 +482,7 @@ class WebAIEngine(QObject):
         logger.error("render process terminated: status=%s code=%s", status, code)
         if self._phase not in ("idle", "ready"):
             self.failed.emit("网页渲染进程崩溃，已自动恢复——请重试本条翻译", self._task)
-        # 销毁重建：page/view 全部弃用，下次任务走全新 _boot
+        # 销毁重建：page/view/profile 全部弃用，下次任务走全新 _boot
         self._stop_poll()
         self._settle_clipboard()
         self._last_instruction = ""  # 页面重建 = 新会话，指令重新注入
@@ -492,6 +494,13 @@ class WebAIEngine(QObject):
         if self._page is not None:
             self._page.deleteLater()
             self._page = None
+        profile = getattr(self, "_profile", None)
+        if profile is not None:
+            # 旧 Profile 不删的话，下次 _boot 同名 Profile 指向同一持久化目录，
+            # 撞 Cookies/leveldb 存储锁（cookie 丢失甚至初始化卡住），且反复
+            # 崩溃重建会累积整套 Chromium 上下文句柄
+            profile.deleteLater()
+            self._profile = None
         self._phase = "idle"
 
     def _ensure_ready(self) -> None:
@@ -527,17 +536,17 @@ class WebAIEngine(QObject):
     # ---- 轮询骨架 ----
 
     def _start_poll(self, handler) -> None:
-        self._stop_poll()
+        # 复用单个 QTimer 只换 handler：每次新建+只 stop 不删会随任务数累积 QObject
         self._poll_handler = handler
-        self._poll = QTimer(self)
-        self._poll.setInterval(POLL_MS)
-        self._poll.timeout.connect(lambda: self._tick(self._poll_handler))
+        if self._poll is None:
+            self._poll = QTimer(self)
+            self._poll.setInterval(POLL_MS)
+            self._poll.timeout.connect(lambda: self._tick(self._poll_handler))
         self._poll.start()
 
     def _stop_poll(self) -> None:
         if self._poll is not None:
             self._poll.stop()
-            self._poll = None
 
     def _run_js(self, js: str, cb) -> None:
         def wrapped(result):

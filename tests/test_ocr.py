@@ -37,7 +37,11 @@ def _isolate_cache(monkeypatch):
     monkeypatch.setattr(database, "get_cached_translation", lambda key: store.get(key))
     monkeypatch.setattr(database, "put_cached_translation",
                         lambda key, src, res: store.__setitem__(key, res))
-    return store
+    yield store
+    # 客户端按连接配置跨请求复用——测试间必须清缓存，否则上个测试的
+    # fake 客户端被本测试复用，请求计数/行为绑定全部错位
+    from app.core import translator
+    translator._client_cache.clear()
 
 
 # ---------------------------------------------------------------- 消息构建

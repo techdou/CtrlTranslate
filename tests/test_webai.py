@@ -221,12 +221,18 @@ def test_render_crash_recovers(engine, qapp):
     closed = []
     engine._win = SimpleNamespace(close=lambda: closed.append(1))
     engine._win._allow_close = False
+    profile_deleted = []
+    engine._profile = SimpleNamespace(deleteLater=lambda: profile_deleted.append(1))
     engine._page = SimpleNamespace(deleteLater=lambda: None)
     engine._on_render_crash(2, 5)
     assert got and "崩溃" in got[0]
     assert engine._phase == "idle"
     assert engine._page is None and engine._win is None
     assert closed == [1]
+    # 旧 Profile 必须一并销毁：下次 _boot 同名 Profile 指向同一持久化目录，
+    # 不删会撞 Cookies/leveldb 存储锁，且反复崩溃会累积 Chromium 上下文
+    assert profile_deleted == [1]
+    assert engine._profile is None
 
 
 # ---------------------------------------------------------------- review 修复回归

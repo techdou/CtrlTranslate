@@ -36,7 +36,9 @@ class TrayController(QObject):
         self.tray = QSystemTrayIcon(icon, self)
         self.tray.setToolTip(f"CtrlTranslate · 双击 {self._key_label} 划词翻译")
 
-        menu = QMenu()
+        # 挂 self 防 GC：setContextMenu 不转移所有权，局部变量丢弃后 parentless
+        # QMenu 存在被回收风险（托盘菜单点击无响应）
+        self._menu = menu = QMenu()
         self.act_enable = QAction(f"启用双击 {self._key_label} 取词", menu)
         self.act_enable.setCheckable(True)
         self.act_enable.setChecked(enabled)
