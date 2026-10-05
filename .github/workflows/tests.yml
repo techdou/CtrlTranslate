@@ -60,6 +60,7 @@ jobs:
           if (-not (Test-Path "dist\CtrlTranslate\CtrlTranslate.exe")) {
             throw "missing build output: dist\CtrlTranslate\CtrlTranslate.exe"
           }
-          if (-not (Get-ChildItem "dist\CtrlTranslate" -Filter "Qt6Core*.dll")) {
+          # PyInstaller onedir 布局：依赖 DLL 全在 _internal\（Qt 在 _internal\PySide6\）
+          if (-not (Get-ChildItem "dist\CtrlTranslate\_internal" -Recurse -Filter "Qt6Core*.dll")) {
             throw "Qt DLLs missing from onedir output"
           }
