@@ -60,6 +60,8 @@ def _derived_fs(fs: int) -> tuple[int, int]:
 class TranslatePopup(QWidget):
     ocr_retry_requested = Signal()      # OCR 重试：截图 bytes 在 main 手里，交还重走截图链
     engine_toggle_requested = Signal()  # 切换翻译引擎（API↔网页）：配置写入归 main 单入口
+    webai_continue_requested = Signal() # 「在网页中继续对话」：唤回站点窗口（网页模式专属）
+    webai_retry_requested = Signal()    # 网页模式重试：交还 main 重新装配（instruction/tag）
 
     def __init__(self, cfg_getter, tts, translator, parent: QWidget | None = None):
         super().__init__(parent)
@@ -214,8 +216,13 @@ class TranslatePopup(QWidget):
             "copy", "复制译文", fg=self._p["accent_text"], hover=self._p["accent_text"])
         self.btn_copy.setObjectName("primary")
         self.btn_retry = IconButton("rotate-cw", "重试（绕过缓存强制重译）", fg=fg, hover=accent)
+        # 网页模式专属：唤回站点窗口继续追问（译文在弹窗看，追问回站点页）
+        self.btn_webai = IconButton(
+            "message-circle-more", "在网页中继续对话（唤出站点窗口）",
+            fg=fg, hover=accent)
+        self.btn_webai.setVisible(False)  # 仅网页引擎任务期间显示（main 控制）
         for b in (self.btn_speak_source, self.btn_speak_trans, self.btn_star,
-                  self.btn_copy, self.btn_retry):
+                  self.btn_copy, self.btn_retry, self.btn_webai):
             btns.addWidget(b)
         btns.addStretch(1)
         # 引擎切换（右端，与左侧"本条译文操作"分离）：显示当前引擎，点击切换，
@@ -247,6 +254,11 @@ class TranslatePopup(QWidget):
         self.btn_star.clicked.connect(self._star)
         self.btn_copy.clicked.connect(self._copy)
         self.btn_retry.clicked.connect(self._retry)
+        self.btn_webai.clicked.connect(self.webai_continue_requested.emit)
+
+    def show_webai_entry(self, visible: bool) -> None:
+        """网页模式任务开始时显示「在网页中继续」入口；API 任务隐藏。"""
+        self.btn_webai.setVisible(visible)
 
     def refresh_engine_button(self) -> None:
         """按当前配置刷新引擎钮文案（main 切换配置后回调 + 每次弹窗展示时）。"""
@@ -471,13 +483,15 @@ class TranslatePopup(QWidget):
 
     def show_translation(self, source: str, method: str = "", force: bool = False,
                          engine=None, request: bool = True, payload: str | None = None,
-                         raw: bool = False) -> int:
+                         raw: bool = False, via_webai: bool = False) -> int:
         """开始一次新的翻译展示。force=True 绕过缓存强制重译（重试入口）。
         engine=None 用默认 API 翻译器；传 WebAIEngine 则由网页引擎承接。
-        request=False 只展示不发请求（OCR：图片任务由调用方发起后 adopt_task 挂回）。
+        request=False 只展示不发请求（OCR：图片任务由调用方发起后 adopt_task 挂回；
+        网页模式：main 侧带 instruction/tag 提交后信号回填）。
         payload=实际发给引擎的内容（默认 source）——网页模式 source=原文仅预览，
         payload=带翻译指令的完整 prompt，重试时重发 payload 而非 source。
-        raw=True：payload 是完整指令（术语解释模板），API 引擎不套翻译 system。"""
+        raw=True：payload 是完整指令（术语解释模板），API 引擎不套翻译 system。
+        via_webai=True：本任务走网页引擎——重试交还 main 重走网页链（不漂移回 API）。"""
         cfg = self._cfg_getter()
         self._source = source
         self._translated = ""
@@ -514,6 +528,7 @@ class TranslatePopup(QWidget):
         self._method = method    # OCR 重试分流依据
         self._payload = payload  # 重试时重发的内容（网页模式=完整 prompt）
         self._raw = raw          # 术语解释等 raw 指令态：重试沿用
+        self._via_webai = via_webai  # 网页模式重试交还 main（带 instruction 重新装配）
         if request:
             tid = (engine or self._translator).translate(
                 payload if payload is not None else source,
@@ -544,6 +559,7 @@ class TranslatePopup(QWidget):
         self._engine = None
         self._method = ""
         self._payload = None
+        self._via_webai = False
         self._raw = False
         self._set_source_preview(source, "原文")
         self.source_label.setVisible(True)
@@ -562,17 +578,24 @@ class TranslatePopup(QWidget):
         self.show_animated()
         self._start_auto_close(cfg)
 
-    def show_message(self, message: str, error: bool = True) -> None:
-        """不发起翻译，仅弹出一条提示（如取词/翻译失败）。错误态带一次微抖。"""
+    def show_message(self, message: str, error: bool = True,
+                     keep_context: bool = False) -> None:
+        """不发起翻译，仅弹出一条提示（如取词/翻译失败）。错误态带一次微抖。
+
+        keep_context=True：保留原文预览与重试上下文（_source/_payload/
+        _via_webai 等）——翻译失败展示后重试按钮必须可用（曾因清空
+        _source 变哑按钮），原文仍在也便于确认失败的是哪段。"""
         p = self._p
         self._reset_for_show()  # 含 _dragged 复位：错误提示也要弹回鼠标旁，而非上次拖放的旧位置
-        self._source = ""
+        if not keep_context:
+            self._source = ""
         self._translated = ""
         self._terms = []
         self._terms_timer.stop()
         self._placeholder_active = False
-        self.source_label.setPlainText("")
-        self.source_label.setVisible(False)  # 空文本时 padding+底色仍会渲染，整块隐藏
+        if not keep_context:
+            self.source_label.setPlainText("")
+            self.source_label.setVisible(False)  # 空文本时 padding+底色仍会渲染，整块隐藏
         self.btn_expand.setVisible(False)
         self._loading_timer.stop()
         self._hide_skeleton()
@@ -715,7 +738,7 @@ class TranslatePopup(QWidget):
     def on_error(self, message: str, task_id: int) -> None:
         if task_id != self._task_id:
             return
-        self.show_message(f"翻译失败：{message}")
+        self.show_message(f"翻译失败：{message}", keep_context=True)
 
     def on_fallback_started(self, task_id: int) -> None:
         """主服务失败、备用服务接管：复位占位机制（首个备用 chunk 整体替换
@@ -788,6 +811,11 @@ class TranslatePopup(QWidget):
             # OCR 的截图 bytes 不在 popup 手里——交还 main 重走截图链
             # （旧实现把"屏幕截图 OCR"五个字当文本翻译，结果荒谬）
             self.ocr_retry_requested.emit()
+            return
+        if getattr(self, "_via_webai", False):
+            # 网页模式重发须带智能注入的 instruction/tag——popup 手里没有，
+            # 交还 main 重新装配（引擎漂移回 API 是错误行为）
+            self.webai_retry_requested.emit()
             return
         # 重试强制重译，绕过缓存；引擎/payload/raw 跟随首次发起时的选择
         self.show_translation(self._source, force=True,

@@ -1,5 +1,5 @@
 @echo off
-rem CtrlTranslate lite build - onedir via spec, no WebEngine.
+rem CtrlTranslate build - single onedir variant (WebEngine included).
 rem Optional: also builds Inno Setup installer when ISCC is on PATH.
 setlocal
 cd /d "%~dp0"
@@ -12,7 +12,7 @@ if not exist .venv\Scripts\pyinstaller.exe (
 echo [build] cleaning old output...
 if exist dist\CtrlTranslate rmdir /s /q dist\CtrlTranslate
 
-echo [build] building CtrlTranslate - lite, onedir ...
+echo [build] building CtrlTranslate - full, onedir ...
 .venv\Scripts\pyinstaller --noconfirm --clean CtrlTranslate.spec || goto :fail
 if not exist dist\CtrlTranslate\CtrlTranslate.exe goto :fail
 echo [build] done: dist\CtrlTranslate\CtrlTranslate.exe
@@ -24,7 +24,7 @@ if errorlevel 1 (
 )
 for /f %%v in ('.venv\Scripts\python -c "from app import __version__; print(__version__)"') do set APPVER=%%v
 echo [build] building installer v%APPVER% ...
-iscc /DAppVersion=%APPVER% /DVariant=lite installer\installer.iss || goto :fail
+iscc /DAppVersion=%APPVER% installer\installer.iss || goto :fail
 echo [build] installer: dist\installer\CtrlTranslate-Setup-%APPVER%.exe
 exit /b 0
 

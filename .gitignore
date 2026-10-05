@@ -13,6 +13,8 @@ build/
 dist/
 dist_new/
 *.spec
+# CI 构建/发版引用的 spec 必须入库（*.spec 的例外）
+!CtrlTranslate.spec
 
 # 内部文档与开发状态（不入库，防止开发过程与内部信息泄漏）
 docs/
@@ -37,6 +39,8 @@ NOTES.md
 CLAUDE.md
 AGENTS.md
 .claude*
+.v2c/
+.video_agent/
 
 # 本地用户数据 / 运行时产物（真实数据只存 ~/.ctrltrans/）
 *.db

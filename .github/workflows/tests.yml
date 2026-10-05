@@ -35,8 +35,8 @@ jobs:
           }
           exit $LASTEXITCODE
 
-  # 构建冒烟 canary：lite 变体 onedir 构建通过才放行（防 spec/入口腐烂；
-  # Web 变体体积大、耗时，留给 release.yml 全量构建）
+  # 构建冒烟 canary：单版本 onedir 构建（含 WebEngine）通过才放行
+  # （防 spec/入口腐烂；体积大、耗时比原 lite canary 长，可接受）
   build-canary:
     runs-on: windows-latest
     needs: test
@@ -51,7 +51,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt pyinstaller
 
-      - name: Build lite variant (onedir)
+      - name: Build (onedir, WebEngine included)
         run: python -m PyInstaller --noconfirm --clean CtrlTranslate.spec
 
       - name: Sanity check

@@ -20,7 +20,10 @@ def _command() -> str:
     python_dir = Path(sys.executable).parent
     pythonw = python_dir / "pythonw.exe"
     interpreter = str(pythonw) if pythonw.exists() else sys.executable
-    entry = Path(sys.argv[0]).resolve() if sys.argv[0] else Path("main.py").resolve()
+    # argv[0] 异常形态（python -c 时为 "-c"）回退项目根 main.py
+    # （本文件在 app/core/ 下：parents[0]=core [1]=app [2]=项目根）
+    argv0 = sys.argv[0] if sys.argv and not sys.argv[0].startswith("-") else ""
+    entry = Path(argv0).resolve() if argv0 else Path(__file__).resolve().parents[2] / "main.py"
     return f'"{interpreter}" "{entry}"'
 
 
@@ -54,12 +57,32 @@ def set_enabled(on: bool) -> bool:
         with _open_run_key(winreg.KEY_SET_VALUE) as key:
             if on:
                 winreg.SetValueEx(key, _APP_NAME, 0, winreg.REG_SZ, _command())
+                logger.info("autostart enabled: %s", _command())
             else:
                 try:
                     winreg.DeleteValue(key, _APP_NAME)
                 except FileNotFoundError:
                     pass
+                logger.info("autostart disabled")
         return True
     except OSError as e:
         logger.warning("autostart set failed: %s", e)
         return False
+
+
+def reconcile(desired: bool | None) -> bool:
+    """启动时对齐注册表与用户意图，修复外部删除造成的漂移（返回最终实际状态）。
+
+    desired=None（配置从未记录过意图）不动作——老用户升级后第一次启动时
+    cfg 里没有 autostart 键，若按默认 False 处理会误删已有的自启。
+    漂移修复场景：勾选自启后注册表键被测试/清理工具删除 → 下次手动启动
+    应用时按意图自动补写，无需用户重新勾选。
+    """
+    if desired is None:
+        return is_enabled()
+    actual = is_enabled()
+    if actual == desired:
+        return actual
+    logger.warning("autostart drift: desired=%s registry=%s -> repairing", desired, actual)
+    ok = set_enabled(desired)
+    return is_enabled() if ok else actual

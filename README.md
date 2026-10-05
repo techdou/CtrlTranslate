@@ -35,8 +35,7 @@
 
 从 [Releases](https://github.com/techdou/CtrlTranslate/releases/latest) 下载安装包，双击安装（可自选安装目录，附开始菜单快捷方式与卸载器）：
 
-- `CtrlTranslate-Setup-*.exe`——轻量版：API 模式（需自备 API Key，智谱 GLM Flash 免费）
-- `CtrlTranslate-Web-Setup-*.exe`——完整版：额外支持网页版引擎（免 API Key 用 DeepSeek 网页免费额度）
+- `CtrlTranslate-Setup-*.exe`——单一完整版：API 模式（自备 API Key，智谱 GLM Flash 免费）与网页版引擎（免 API Key 用 DeepSeek 网页免费额度）双引擎内置，应用内一键切换
 
 也提供免安装的**便携版 zip**（解压即用，适合 U 盘/临时环境）。配置与数据统一存放在 `~/.ctrltrans`，覆盖升级、换装便携版互不影响。
 
@@ -44,8 +43,7 @@
 
 ```bat
 pip install -r requirements.txt pyinstaller
-build.bat          :: 轻量版 → dist\CtrlTranslate\ + 安装包（可选）
-build-web.bat      :: 完整版 → dist\CtrlTranslate-Web\ + 安装包（可选）
+build.bat          :: → dist\CtrlTranslate\ + 安装包（可选）
 ```
 
 ### 方式二：源码运行
@@ -110,7 +108,7 @@ app/
   ui/              # 翻译弹窗 / 截图遮罩 / 设置 / 历史生词本 / 托盘 / 主题
   db/              # SQLite 存储层
 tests/             # 单元测试（GitHub Actions 自动运行）
-installer/         # Inno Setup 安装器脚本（双变体共用）
+installer/         # Inno Setup 安装器脚本
 scripts/           # 开发辅助（端到端测试 / 截图 / 图标生成 / 剪贴板修复）
 assets/            # 应用图标 + 界面截图
 site/              # GitHub Pages 项目主页
@@ -119,14 +117,14 @@ site/              # GitHub Pages 项目主页
 
 ### 发版流程
 
-打 tag 触发 `release.yml` 自动构建并上传（双安装包 + 双便携 zip）。**版本号 bump 必须在打 tag 之前**——CI 有一致性门禁，tag 与 `app/__init__.py` 不符直接失败：
+打 tag 触发 `release.yml` 自动构建并上传（安装包 + 便携 zip 共 2 个资产）。**版本号 bump 必须在打 tag 之前**——CI 有一致性门禁，tag 与 `app/__init__.py` 不符直接失败：
 
 ```bat
 :: 1. bump app/__init__.py 的 __version__ 并提交
-:: 2. 打 tag 并推送（tag 形如 v1.5.2）
-git tag v1.5.2
-git push origin main v1.5.2
-:: 3. Actions 自动：版本门禁 → pytest → 双变体构建 → 安装包 → 上传 Release
+:: 2. 打 tag 并推送（tag 形如 v1.6.0）
+git tag v1.6.0
+git push origin main v1.6.0
+:: 3. Actions 自动：版本门禁 → pytest → onedir 构建 → Inno Setup 安装包 + 便携 zip → 上传 Release
 ```
 
 ## 已知边界
@@ -136,6 +134,7 @@ git push origin main v1.5.2
 
 ## 版本历史
 
+- **v1.6.0**（2026-10-03）——**分发形态收敛为单一安装包版本**：网页版引擎从独立发行变体改为应用内模式（双引擎内置、一键切换，不再区分轻量版/完整版）；单 exe（onefile）退役，统一 onedir 目录 + Inno Setup 安装包 + 便携 zip 三种获取方式；**修复开机自启静默失效**：单测曾误删用户注册表自启键（勾选后跑一次测试即被清除），测试改用隔离键名，并新增启动自愈——自启键被外部删除时按勾选记录自动恢复；稳定性大修（v1.5.1 后合入）：取词剪贴板白名单 + busy 看门狗、Windows 静默摘钩自愈重挂、WebEngine 剪贴板操作全部移出主线程、异常三件套落日志（windowed exe 异常不再无痕蒸发）、TTS 缓存与 SQLite WAL、单安装包 CI 发版流水线
 - **v1.5.1**（2026-09-14）——**修复组合热键时灵时不灵**：弃用 keyboard 库 `add_hotkey`（其匹配机制在快速按键时存在竞态，Alt+Q / Alt+E 快按快放偶发漏触发），改为与双击检测同一条全局事件流 + 自研组合键状态机匹配，并加入物理键态复核自愈；**修复设置页说明文字被截断**：全部说明文字自动换行，窄窗口下不再溢出；**热键显示规范化**：设置页与托盘菜单统一显示 `Alt+Q` 形式；**网页引擎窗口关闭行为**：点 × 从最小化改为隐藏（任务栏不再占位，登录态保留，托盘可唤回）；术语截图的开关不再被 OCR 开关误伤；热键链路补充运行日志便于排查
 - **v1.5.0**（2026-09-11）——**术语解释模式**：Alt+E 划词提问，回答首行一句话定义，主词与关联术语自动进生词本，取词失败自动降级框选截图；**提示词模板**：设置新增模板页，六套模板覆盖划词/截图 × 学习/简洁与术语解释，`{text}` 占位符、留空回退内置默认；**网页模式体验重构**：划词/截图直接弹内嵌站点页面看流式回复，完成后自动归档历史、【术语】段自动入生词本，托盘子菜单可切换引擎；**OCR 两阶段修复**：视觉模型纯识别 → 文本链翻译，历史记录保存真实原文，翻译阶段接入缓存与备用服务；**UI 第二轮灵动化**：弹窗按钮全面图标化（内嵌 Lucide 风 SVG + 2x 超采样渲染）、设置页卡片分组与自绘开关、侧栏滑动指示条、生词本与截图遮罩细节优化
 - **v1.4.0**（2026-09-11）——**网页版引擎（免费额度）**：内嵌网页版 AI（默认 DeepSeek，登录一次长期有效），划词/截图免 API Key 翻译；译文弹窗一键切换引擎（API↔网页）；托盘支持开新会话、上传文档作上下文；配套修复 OCR 结果不显示的 P0 bug（任务号被守卫丢弃）与遮罩/热键双 bug；发版提供轻量版（约 70MB，无网页组件）与完整版（约 220MB，CtrlTranslate-Web.exe）双资产

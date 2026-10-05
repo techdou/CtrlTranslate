@@ -365,12 +365,19 @@ class SettingsDialog(QDialog):
         self.ck_webai = self._mk_toggle(webai.get("enabled", False))
         self.ck_auto_terms = QCheckBox("自动把【术语】段收录进生词本（网页引擎回复 + 术语解释模式）")
         self.ck_auto_terms.setChecked(webai.get("auto_terms", True))
+        self.sp_refresh_n = QSpinBox()
+        self.sp_refresh_n.setRange(1, 50)
+        self.sp_refresh_n.setValue(int(webai.get("instruction_refresh_n", 8)))
         lbl_webai_hint = _hint("划词/截图改走内嵌网页版 DeepSeek，无需 API Key；"
                                "首次使用会弹出网页窗口，登录一次长期有效，速度取决于网页服务。"
                                "与 API 模式二选一，重试按钮跟随各自引擎。")
+        lbl_refresh_hint = _hint("同一指令连续翻译时只发原文防刷屏，每 N 条强制重注入一次"
+                                 "格式指令防长会话漂移；调大 = 页面更干净，调小 = 格式更稳。")
         web_card = self._card(vbox, "网页版引擎（免费额度）")
         web_card.addRow("启用", self.ck_webai)
         web_card.addRow("", self.ck_auto_terms)
+        web_card.addRow("指令重注入间隔（条）", self.sp_refresh_n)
+        web_card.addRow("", lbl_refresh_hint)
         web_card.addRow("", lbl_webai_hint)
         vbox.addStretch(1)
         return _scroll(page)
@@ -944,6 +951,7 @@ class SettingsDialog(QDialog):
         w = cfg.setdefault("webai", {})
         w["enabled"] = self.ck_webai.isChecked()
         w["auto_terms"] = self.ck_auto_terms.isChecked()
+        w["instruction_refresh_n"] = self.sp_refresh_n.value()
 
         pr = cfg.setdefault("prompts", {})
         for key, ed in self._prompt_edits.items():

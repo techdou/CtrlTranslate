@@ -1,35 +1,23 @@
-; CtrlTranslate Inno Setup 安装器（轻量/完整双变体共用一份脚本）
+; CtrlTranslate Inno Setup 安装器（单一完整版，含 WebEngine 网页模式）
 ;
 ; 构建（在仓库根目录）：
-;   iscc /DAppVersion=1.5.1 /DVariant=lite installer\installer.iss   → dist\installer\CtrlTranslate-Setup-1.5.1.exe
-;   iscc /DAppVersion=1.5.1 /DVariant=web  installer\installer.iss   → dist\installer\CtrlTranslate-Web-Setup-1.5.1.exe
+;   iscc /DAppVersion=1.6.0 installer\installer.iss   → dist\installer\CtrlTranslate-Setup-1.6.0.exe
 ;
-; 变体差异：lite 不含 WebEngine（体积小、纯 API 模式）；web 含网页模式。
-; 双变体 AppId 不同 → 可共存在不同目录；配置/数据统一在 ~/.ctrltrans，
-; 覆盖升级不丢登录态与历史。
+; 网页版引擎是应用内模式开关（托盘「启用网页版引擎」），不再拆 lite/Web
+; 双变体。配置/数据统一在 ~/.ctrltrans，覆盖升级不丢登录态与历史。
 ;
 ; 中文语言文件（ChineseSimplified.isl）不在 Inno 官方捆绑清单里——存在则
 ; 自动启用，不存在回退英文（CI 与本地行为一致，不因语言文件缺失而挂构建）。
-
-#ifndef Variant
-#define Variant "web"
-#endif
 
 ; 版本号由构建方注入（iscc /DAppVersion=x.y.z）；本地直接双击编译时兜底
 #ifndef AppVersion
 #define AppVersion "0.0.0"
 #endif
-#if Variant == "lite"
-  #define AppName "CtrlTranslate"
-  #define AppExeName "CtrlTranslate.exe"
-  #define SourceRoot "..\dist\CtrlTranslate"
-  #define AppId "{{7A1C4E92-5B3D-4E8F-9C2A-1D6B8E5F4A73}"
-#else
-  #define AppName "CtrlTranslate Web"
-  #define AppExeName "CtrlTranslate-Web.exe"
-  #define SourceRoot "..\dist\CtrlTranslate-Web"
-  #define AppId "{{C4E9A2F7-8D1B-4A3C-B5E6-F0927D8A1C44}"
-#endif
+
+#define AppName "CtrlTranslate"
+#define AppExeName "CtrlTranslate.exe"
+#define SourceRoot "..\dist\CtrlTranslate"
+#define AppId "{{7A1C4E92-5B3D-4E8F-9C2A-1D6B8E5F4A73}"
 
 [Setup]
 AppId={#AppId}

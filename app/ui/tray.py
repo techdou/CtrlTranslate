@@ -65,6 +65,12 @@ class TrayController(QObject):
 
         # 网页版引擎子菜单（无网页任务时也可用：登录入口本就在这）
         web_menu = QMenu("网页翻译", menu)
+        # 状态行（禁用态纯展示）：未启动/未登录/就绪/翻译中…——常驻可见性，
+        # 不再全靠一次性气泡
+        self.act_webai_status = QAction("状态：未启动", web_menu)
+        self.act_webai_status.setEnabled(False)
+        web_menu.addAction(self.act_webai_status)
+        web_menu.addSeparator()
         self.act_webai_engine = QAction("启用网页版引擎（划词走 DeepSeek）", web_menu)
         self.act_webai_engine.setCheckable(True)
         self.act_webai_engine.toggled.connect(self.webai_engine_changed.emit)
@@ -104,6 +110,10 @@ class TrayController(QObject):
         """同步网页引擎勾选态（配置变更/弹窗切换后回调，不触发 toggled 之外的副作用——
         setChecked 在值未变时也不发 toggled，值变化时 main 侧 on_tray_engine_changed 幂等）。"""
         self.act_webai_engine.setChecked(on)
+
+    def set_webai_status(self, text: str) -> None:
+        """网页引擎状态行（子菜单顶部禁用项）：就绪/未登录/翻译中…等。"""
+        self.act_webai_status.setText(f"状态：{text}")
 
     def _on_activated(self, reason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.DoubleClick:

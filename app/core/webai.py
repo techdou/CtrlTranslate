@@ -29,7 +29,8 @@ logger = logging.getLogger("ctrltrans.webai")
 POLL_MS = 800            # 回复区轮询间隔
 REPLY_STABLE_ROUNDS = 2  # 连续 N 轮文本不变且无停止按钮 → 流式结束
 PAGE_LOAD_TIMEOUT_S = 30
-TASK_TIMEOUT_S = 120     # 单任务总超时（含流式）
+TASK_TIMEOUT_S = 120     # 无进展总超时（loading/filling/sending 阶段上限）
+STREAM_STALL_S = 30      # 流式回复无进展超时——有新文本即续期（长译文不再被总时长误杀）
 PASTE_SETTLE_MS = 1200   # 贴图后等缩略上传再填 prompt
 UPLOAD_VERIFY_S = 8      # 上传后等待附件就绪的上限
 INSTRUCTION_REFRESH_N = 8  # 同指令连续任务每 N 次强制重注入一次（防长会话格式漂移）
@@ -167,19 +168,31 @@ class _WebAIPage:
 
 
 class _WebAIWindow:
-    """承载窗口工厂：关闭按钮 = 最小化（保住 view——page 脱离 view 即失能）。"""
+    """承载窗口工厂：关闭按钮 = 隐藏（保住 view——page 脱离 view 即失能）。
+
+    窗口几何（位置/尺寸）经 QSettings 持久化：用户摆过位置后，隐藏再唤回
+    回到原位，而不是每次跳到光标旁；首次无记录才由 present_window 落位。
+    """
 
     @staticmethod
     def make(page, title: str):
+        from PySide6.QtCore import QSettings
         from PySide6.QtWebEngineWidgets import QWebEngineView
         from PySide6.QtWidgets import QMainWindow
 
+        settings = QSettings("techdou", "CtrlTranslate")
+
         class _Win(QMainWindow):
+            def _save_geo(self) -> None:
+                settings.setValue("webai/geometry", self.saveGeometry())
+
             def closeEvent(self, event):
                 # 关闭 = 裸 page = load/runJavaScript 全失能（spike v3 实证），
                 # 拦截关闭改隐藏：体验上等同关闭（任务栏不再占位），view/page
                 # 保留——后台收流式回复、登录态不丢，下次任务/托盘入口再弹出；
                 # 程序退出时 QApplication 销毁不受影响
+                self._save_geo()
+                self._geo_restored = True  # 用户此刻的摆放即有效位置（本进程内不再光标重定位）
                 if not getattr(self, "_allow_close", False):
                     event.ignore()
                     self.hide()
@@ -188,7 +201,10 @@ class _WebAIWindow:
 
         win = _Win()
         win.setWindowTitle(title)
-        win.resize(1100, 780)
+        geo = settings.value("webai/geometry")
+        win._geo_restored = bool(geo) and win.restoreGeometry(geo)
+        if not win._geo_restored:
+            win.resize(1100, 780)
         view = QWebEngineView(win)
         view.setPage(page)
         win.setCentralWidget(view)
@@ -234,19 +250,27 @@ class WebAIEngine(QObject):
     用户可读原因）。
     """
 
-    chunk = Signal(str, int)          # (流式增量, 任务号)
-    finished = Signal(str, int)       # (完整回复, 任务号)
+    chunk = Signal(str, int)          # (流式增量, 调用方 tag)
+    finished = Signal(str, int)       # (完整回复, 调用方 tag)
     failed = Signal(str, int)
     login_required = Signal()         # 网页未登录：上层应弹出窗口引导登录
+    login_ok = Signal()               # 登录监测发现用户已完成登录（划词即用）
     upload_done = Signal(bool, str)   # 文档上传结果 (ok, 用户可读信息)
+    session_ready = Signal(bool, str) # 新会话异步结果 (ok, 用户可读信息)——
+    # 请求发出≠成功：重定向回旧会话/侧栏兜底失败/超时都要真实回报，勿谎报
+    status_changed = Signal(str)      # 引擎状态人话文案（托盘菜单状态行展示）
 
-    def __init__(self, site: str = "deepseek", parent: QObject | None = None):
+    def __init__(self, site: str = "deepseek", refresh_n: int = 0,
+                 parent: QObject | None = None):
         super().__init__(parent)
         self.adapter = ADAPTERS.get(site, DeepSeekAdapter)()
+        # 指令重注入间隔可配（config.webai.instruction_refresh_n）；0 = 内置默认
+        self._refresh_n = refresh_n or INSTRUCTION_REFRESH_N
         self._page = None
         self._win = None        # 承载窗口（boot 先最小化建出；任务触发即弹前台）
         self._poll: QTimer | None = None
         self._task = 0
+        self._tag = 0           # 当前任务的调用方标签（随信号透传，见 submit_text）
         self._phase = "idle"    # idle/loading/ready/filling/sending/reading/pasting/uploading
         self._reply_prev = ""
         self._stable = 0
@@ -268,6 +292,12 @@ class WebAIEngine(QObject):
         self._last_instruction = ""  # 上一次成功发出的指令
         self._since_inject = 0       # 距上次注入的连续裸发任务数
         self._paste_image = None     # 待上剪贴板的截图（快照完成前暂存）
+        self._session_has_attachment = False  # 当前会话挂着文档附件（新会话即失效）
+        self._queued: dict | None = None  # 忙时待发槽（替换语义：新划词顶掉旧待发）
+        self._preflight = False      # 启用引擎后的登录预检中（ready 时不派发任务）
+        self._login_watch_deadline = 0.0  # 登录监测截止（login 窗口弹出后等用户操作）
+        self._login_watching = False # 登录监测进行中（收尾路径不覆盖「未登录」状态）
+        self._rounds = 0             # 当前会话已完成任务数（状态行"会话第 N 轮"）
         # 剪贴板快照/恢复全部走串行后台线程（主线程零 Win32 剪贴板调用）
         self._clip_worker = _ClipboardWorker(self)
         self._clip_worker.done.connect(self._on_clip_job)
@@ -279,21 +309,26 @@ class WebAIEngine(QObject):
         """有任务在途（调用方预检用，busy 时 submit 会被拒）。"""
         return self._phase not in ("idle", "ready")
 
-    def submit_text(self, text: str, instruction: str = "") -> int:
-        """提交纯文本任务（划词翻译）。返回任务号；忙时返回 -1。
+    def submit_text(self, text: str, instruction: str = "", tag: int = 0) -> int:
+        """提交纯文本任务（划词翻译）。返回引擎内部任务号；忙时返回 -1（已入待发槽）。
+
+        tag = 调用方展示任务号（popup 的展示号），随 chunk/finished/failed
+        信号原样透传回调用方——上层守卫不依赖引擎内部计数，与 API 引擎的
+        任务号空间彻底隔离（两引擎切换瞬间迟到信号不会串台弹窗）。
+        缺省 0 = 用引擎内部任务号（兼容旧调用/单测）。
 
         instruction = 模板中 {text} 之前的指令前缀。与上次注入相同且距上次
-        注入不足 INSTRUCTION_REFRESH_N 次 → 只发原文（连续翻译不刷屏）；
-        指令变化 / 超过刷新间隔 → 指令拼在原文前重新注入。instruction 为空
-        （调用方自拼全量 payload，如术语解释模板 {text} 在中部）→ 恒定全量。
+        注入不足刷新间隔（config.webai.instruction_refresh_n）→ 只发原文
+        （连续翻译不刷屏）；指令变化 / 超过刷新间隔 → 指令拼在原文前重新注入。
+        instruction 为空（调用方自拼全量 payload，如术语解释模板 {text} 在
+        中部）→ 恒定全量。
         """
-        self._instruction = (instruction or "").strip()
-        return self._submit(text, image=False)
+        return self._submit(text, image=False, tag=tag,
+                            instruction=(instruction or "").strip())
 
-    def submit_image(self, png_bytes: bytes, prompt: str) -> int:
+    def submit_image(self, png_bytes: bytes, prompt: str, tag: int = 0) -> int:
         """提交图片任务（截图翻译）：贴图 + prompt 一起发送。"""
-        self._image_bytes = png_bytes
-        return self._submit(prompt, image=True)
+        return self._submit(prompt, image=True, tag=tag, image_bytes=png_bytes)
 
     def translate(self, text: str, use_cache: bool = False, raw: bool = False) -> int:
         """与 Translator.translate 同名兼容：popup 统一入口直接切换引擎。
@@ -313,9 +348,11 @@ class WebAIEngine(QObject):
         self._last_instruction = ""  # 新会话是空画布：首个任务重新注入指令
         self._since_inject = 0
         logger.info("new session requested")
+        self._status("开启新会话…")
         self._phase = "loading"
         self._ns_attempted = False
         self._ns_deadline = time.monotonic() + PAGE_LOAD_TIMEOUT_S
+        self._deadline = self._ns_deadline  # 通用 _tick 用：沿用旧任务 deadline 会首轮误杀
         self._page.load(QUrl(self.adapter.url))
         self._start_poll(self._probe_new_session)
         return True
@@ -350,12 +387,46 @@ class WebAIEngine(QObject):
             self._boot()  # 首次直接建 page+窗口并最小化，再弹出
         self.present_window()
 
-    def present_window(self) -> None:
-        """把网页窗口弹到前台并定位——网页模式下的"弹窗"就是本窗口：
-        划词/截图触发即弹出，用户直接在站点页面里看流式回复、继续追问。
+    def preflight_login(self) -> None:
+        """启用网页引擎后主动预检登录态（而非等首次划词失败才发现）。
 
-        已正常显示（用户摆过位置）只抬高不挪动；最小化/隐藏态则重新定位到
-        当前光标附近弹出。"""
+        已登录：静默就绪；未登录：弹窗引导 + login_required（上层通知）+
+        启动登录监测——用户登录完成后 login_ok（上层通知"划词即用"）。
+        引擎忙（在途任务）时跳过：任务链自己的探测会覆盖登录检测。
+        """
+        if self._phase not in ("idle", "ready"):
+            return
+        self._preflight = True
+        self._login_watching = False  # 预检接管轮询：旧监测终结
+        self._phase = "loading"  # 探测器的 phase 守卫只认 loading（真机冒烟实锤过漏置的坑）
+        self._status("检查登录状态…")
+        if self._page is None:
+            self._boot()
+        else:
+            self._ensure_ready()
+
+    def _status(self, msg: str) -> None:
+        self.status_changed.emit(msg)
+
+    def set_refresh_n(self, n: int) -> None:
+        """运行时更新指令重注入间隔（设置页保存后即时生效，无需重启）。"""
+        n = int(n)
+        if 1 <= n != self._refresh_n:
+            self._refresh_n = n
+            logger.info("instruction refresh interval -> %d", n)
+
+    def _status_ready(self) -> None:
+        """就绪态文案：带会话轮数，长会话提示开新会话（防指令格式漂移）。"""
+        if self._rounds >= self._refresh_n:
+            self._status(f"就绪 · 会话第 {self._rounds} 轮（建议开新会话）")
+        else:
+            self._status("就绪" if not self._rounds else f"就绪 · 会话第 {self._rounds} 轮")
+
+    def present_window(self) -> None:
+        """把网页窗口弹到前台并定位——登录引导 / 贴图 / 「在网页中继续」入口。
+
+        已正常显示（用户摆过位置）只抬高不挪动；隐藏/最小化态恢复显示：
+        有持久化几何（用户上次摆放）回到原位，否则首次定位到光标附近。"""
         if self._win is None:  # 理论到不了这（page 与窗口同生共死）；兜底重建
             self._win = _WebAIWindow.make(
                 self._page, f"CtrlTranslate · 网页翻译（{self.adapter.name}）")
@@ -364,7 +435,8 @@ class WebAIEngine(QObject):
             win.raise_()
             win.activateWindow()
             return
-        self._place_near_cursor()
+        if not getattr(win, "_geo_restored", False):
+            self._place_near_cursor()
         win.showNormal()
         win.raise_()
         win.activateWindow()
@@ -401,6 +473,7 @@ class WebAIEngine(QObject):
         self._upload_path = str(Path(path).resolve())
         self._task += 1  # 作废在途任务
         self._phase = "loading"
+        self._login_watching = False  # 上传接管轮询：旧监测终结
         self._deadline = time.monotonic() + TASK_TIMEOUT_S
         if self._page is None:
             self._boot()
@@ -409,14 +482,26 @@ class WebAIEngine(QObject):
 
     # ---- 任务装配 ----
 
-    def _submit(self, text: str, image: bool) -> int:
+    def _submit(self, text: str, image: bool, tag: int = 0,
+                instruction: str = "", image_bytes: bytes | None = None) -> int:
         if self._phase not in ("idle", "ready"):
-            logger.warning("busy (%s), task dropped", self._phase)
+            # 网页会话本质串行：忙时进替换队列（新划词顶掉旧待发槽），
+            # 当前任务收尾后自动发出——上层无需预检重试。全量参数入槽，
+            # 不碰任何在途任务字段（曾因预写 _instruction/_image_bytes 污染
+            # 在途任务的注入判断与贴图内容）
+            self._queued = {"text": text, "image": image, "tag": tag,
+                            "instruction": instruction, "image_bytes": image_bytes}
+            logger.info("task queued (busy in %s), replaces pending slot", self._phase)
             return -1
         self._task += 1
+        self._tag = tag or self._task
+        self._instruction = instruction
+        self._login_watching = False  # 新任务接管轮询：登录监测语义终结（勿残留锁死状态文案）
+        if image:
+            self._image_bytes = image_bytes
         self._pending_inject = bool(self._instruction) and (
             self._instruction != self._last_instruction
-            or self._since_inject >= INSTRUCTION_REFRESH_N)
+            or self._since_inject >= self._refresh_n)
         self._pending_text = (
             f"{self._instruction}\n{text}" if self._pending_inject else text)
         self._pending_image = image
@@ -425,22 +510,49 @@ class WebAIEngine(QObject):
         if self._page is None:
             self._boot()
             if self._page is None:
-                # boot 失败（轻量版无 WebEngine 组件）：failed 已随本任务号发出，
+                # boot 失败（环境缺 WebEngine）：failed 已随本任务 tag 发出，
                 # 页面不存在、无窗口可呈现，直接返回让上层走 failed 通道提示
                 return self._task
-        self.present_window()
+        # 文本任务不弹窗：回复走调用方弹窗（tag 信号链），不打断当前焦点；
+        # 只有图片任务必须弹——贴图要真实键盘输入（isTrusted），
+        # 未登录场景由 _probe_ensure 的登录分支按需弹窗
+        if image:
+            self.present_window()
         self._ensure_ready()
         return self._task
+
+    def _drain_queued(self) -> None:
+        """任务收尾后发出待发槽（替换语义：槽里永远是最新一次划词）。"""
+        if not self._queued or self._phase not in ("idle", "ready"):
+            return
+        q, self._queued = self._queued, None
+        logger.info("draining queued task")
+        self._submit(q["text"], q["image"], tag=q.get("tag") or 0,
+                     instruction=q.get("instruction", ""),
+                     image_bytes=q.get("image_bytes"))
+
+    def _drop_queued_with_signal(self) -> None:
+        """作废待发槽并给被作废任务的 tag 发终止信号。
+
+        排队任务的弹窗已在等它的结果（loading 骨架）——静默丢弃会让弹窗
+        永远转圈。发 failed 让弹窗走出错误态（用户重试/切换引擎）。"""
+        q, self._queued = self._queued, None
+        if q and q.get("tag"):
+            self.failed.emit("网页版未登录，本条已取消——请在弹出的窗口中登录后重试",
+                             q["tag"])
+            logger.info("queued task cancelled (login required), tag=%s", q["tag"])
 
     def _boot(self) -> None:
         try:
             from PySide6.QtWebEngineCore import QWebEngineProfile
         except ImportError:
-            # 轻量版（构建时排除 WebEngine）没有该组件：API 模式照常，网页模式给出指引
+            # 非常规环境（如手工裁剪依赖）没有 WebEngine：API 模式照常，网页模式给出指引
             self._phase = "idle"
+            self._preflight = False    # 绕过 _cleanup_task 的出口须显式清标记
+            self._login_watching = False
             self.failed.emit(
-                "此构建未包含网页组件——请下载完整版（CtrlTranslate-Web），"
-                "或在设置中关闭「网页版引擎」改用 API 模式", self._task)
+                "当前运行环境缺少网页组件（QtWebEngine）——"
+                "请在设置中关闭「网页版引擎」改用 API 模式", self._tag)
             return
 
         # 用户数据跟项目惯例进 ~/.ctrltrans/，登录 cookie 长期有效
@@ -459,6 +571,7 @@ class WebAIEngine(QObject):
         self._win = _WebAIWindow.make(
             self._page, f"CtrlTranslate · 网页翻译（{self.adapter.name}）")
         self._win.showMinimized()
+        self._status("启动中…")
         logger.info("webai page booted, storage=%s", storage)
         self._navigated = True
         self._page.load(QUrl(self.adapter.url))
@@ -480,11 +593,16 @@ class WebAIEngine(QObject):
 
     def _on_render_crash(self, status, code) -> None:
         logger.error("render process terminated: status=%s code=%s", status, code)
+        tag = self._tag  # 崩溃报错须带当前任务 tag（内部 _task 会撞 API 引擎任务号空间）
         if self._phase not in ("idle", "ready"):
-            self.failed.emit("网页渲染进程崩溃，已自动恢复——请重试本条翻译", self._task)
-        # 销毁重建：page/view/profile 全部弃用，下次任务走全新 _boot
+            self.failed.emit("网页渲染进程崩溃，已自动恢复——请重试本条翻译", tag)
+        # 销毁重建：page/view/profile 全部弃用，下次任务走全新 _boot。
+        # 手动清场不走 _cleanup_task：预检/监测标记必须显式清——残留的
+        # _preflight 会把 drain 出的下一条真实任务当预检静默吞掉
         self._stop_poll()
         self._settle_clipboard()
+        self._preflight = False
+        self._login_watching = False
         self._last_instruction = ""  # 页面重建 = 新会话，指令重新注入
         self._since_inject = 0
         if self._win is not None:
@@ -502,6 +620,8 @@ class WebAIEngine(QObject):
             profile.deleteLater()
             self._profile = None
         self._phase = "idle"
+        # 页面已重建就绪路径恢复：待发槽里的任务重发到新页面（自愈重试）
+        self._drain_queued()
 
     def _ensure_ready(self) -> None:
         """页面活着就直接用（避免每次任务重载丢会话节奏），否则导航。"""
@@ -516,22 +636,79 @@ class WebAIEngine(QObject):
         if self.adapter.login_marker in d.get("url", ""):
             self.present_window()
             self.login_required.emit()
-            self._fail("网页版未登录——请在弹出的窗口中登录后再试")
+            was_preflight = self._preflight
+            self._preflight = False
+            self._drop_queued_with_signal()  # 作废待发任务必须发终止信号（其弹窗在等）
+            if not was_preflight:
+                self._fail("网页版未登录——请在弹出的窗口中登录后再试")
+            else:
+                self._cleanup_task()  # 预检无任务语义：只收尾，不发 failed
+            # watch 必须在 fail/cleanup 之后启动（它们的 _stop_poll 会杀掉
+            # 刚启动的监测轮询）；"未登录"状态后置覆盖 _fail 刷出的"就绪"
+            self._start_login_watch()
+            self._status("未登录——请在窗口中登录")
             return
         if d.get("inputVisible"):
+            if self._preflight:
+                # 登录预检（或登录监测）确认就绪：不派发任务，静默待命；
+                # 待发槽任务此时该发出（用户可能在监测期间划过词）
+                self._preflight = False
+                self._phase = "idle"
+                self._stop_poll()
+                self._status_ready()
+                self._drain_queued()
+                return
             # 输入框可用 = 页面就绪，直接开任务（有历史会话则上下文延续，是特性）
             self._phase = "ready"
             if self._upload_pending:
+                self._status("上传中…")
                 self._do_upload_file()
             elif self._pending_image:
+                self._status("贴图中…")
                 self._do_paste_image()
             else:
+                self._status("发送中…")
                 self._do_fill()
             return
         # 页面没就绪：首次/导航后 → 加载
         if not getattr(self, "_navigated", False):
             self._navigated = True
             self._page.load(QUrl(self.adapter.url))
+
+    # ---- 登录监测（login 窗口弹出后等用户完成登录）----
+
+    def _start_login_watch(self) -> None:
+        self._login_watch_deadline = time.monotonic() + 300  # 给足用户操作时间
+        # 通用 _tick 检查的是 _deadline——不刷新的话，上一任务遗留的过期
+        # deadline 会在首轮 tick 就把监测当任务超时杀掉
+        self._deadline = self._login_watch_deadline
+        self._login_watching = True
+        self._start_poll(self._probe_login_watch)
+        logger.info("login watch started")
+
+    def _probe_login_watch(self, d) -> None:
+        if d is None:
+            return
+        if self._phase != "idle":
+            self._login_watching = False  # 用户已开始新任务：监测退位，勿锁死状态文案
+            return
+        url = d.get("url", "")
+        if self.adapter.login_marker not in url and d.get("inputVisible"):
+            self._stop_poll()
+            self._login_watching = False
+            self._status_ready()
+            self.login_ok.emit()
+            logger.info("login confirmed")
+            return
+        if time.monotonic() > self._login_watch_deadline:
+            self._login_watch_expired()
+
+    def _login_watch_expired(self) -> None:
+        """登录监测超时：静默结束（非任务失败——不发 failed，别吓用户）。"""
+        self._stop_poll()
+        self._login_watching = False
+        self._status("未登录")
+        logger.info("login watch expired")
 
     # ---- 轮询骨架 ----
 
@@ -559,7 +736,18 @@ class WebAIEngine(QObject):
 
     def _tick(self, handler) -> None:
         if time.monotonic() > self._deadline:
-            self._fail(f"任务超时（{TASK_TIMEOUT_S}s）——网页未响应或网络过慢")
+            # 超时出口按操作类型分流：新会话/登录监测走各自的专用收尾
+            # （_probe_* 内部检查 deadline 的路径覆盖不到这里——_tick 先拦）。
+            # 绑定方法每次访问是新对象，须用 ==（is 恒 False）
+            h = getattr(self, "_poll_handler", None)
+            if h is not None and self._phase == "idle" and \
+                    h == self._probe_login_watch:
+                self._login_watch_expired()
+                return
+            if h is not None and h == self._probe_new_session:
+                self._ns_timeout()
+                return
+            self._fail("任务超时——网页长时间无进展（网络过慢或站点无响应）")
             return
         self._run_js(self.adapter.PROBE, handler)
 
@@ -567,23 +755,33 @@ class WebAIEngine(QObject):
         logger.warning("task %s failed: %s", self._task, why)
         upload = self._upload_pending or self._phase == "uploading"
         self._upload_pending = False
+        tag = self._tag
         self._cleanup_task()
         if upload:
             # 上传流程失败必须走 upload_done——failed 会撞 popup 任务号守卫被
             # 静默丢弃（上传时刻 popup 不持有本任务号），托盘零通知
             self.upload_done.emit(False, why)
         else:
-            self.failed.emit(why, self._task)
+            self.failed.emit(why, tag)
+        if self._login_watching:
+            self._status("未登录——请在窗口中登录")  # 登录场景的失败别刷成"就绪"
+        else:
+            self._status_ready()
 
     def _finish(self, text: str) -> None:
         logger.info("task %s finished (%d chars)", self._task, len(text))
+        tag = self._tag
+        self._rounds += 1
         self._cleanup_task()
-        self.finished.emit(text, self._task)
+        self.finished.emit(text, tag)  # cleanup 可能 drain 新任务（换 _tag），先存再发
+        self._status_ready()
 
     def _cleanup_task(self) -> None:
         self._stop_poll()
         self._settle_clipboard()
         self._phase = "idle"
+        self._preflight = False  # 异常收尾兜底：预检标记残留会把下一条真实任务静默吞掉
+        self._drain_queued()
 
     def _settle_clipboard(self) -> None:
         if self._clip_saved is not None:
@@ -629,6 +827,7 @@ class WebAIEngine(QObject):
             self._phase = "reading"
             self._reply_prev = ""
             self._stable = 0
+            self._status("翻译中…")
             logger.info("task %s sent, reading stream…", self._task)
             self._start_poll(self._probe_reply)
         # 未解锁时下一轮 _probe_send 重试
@@ -650,20 +849,23 @@ class WebAIEngine(QObject):
             return
         if not self._page.chooser_fired:
             if time.monotonic() > self._upload_deadline - UPLOAD_VERIFY_S + 3:
-                self._phase = "idle"
-                self._stop_poll()
+                self._cleanup_task()
+                self._status_ready()  # 收尾刷新（否则状态停在"上传中…"）
                 self.upload_done.emit(False, "上传入口未响应（站点可能改版），请打开网页窗口手动上传")
             return
         # chooseFiles 已回填路径：等站点上传完成（发送键解锁且输入框空 = 附件挂上）
         if d.get("sendEnabled") and not d.get("inputValue"):
-            self._phase = "idle"
-            self._stop_poll()
+            self._session_has_attachment = True
             logger.info("upload ok: attachment ready")
-            self.upload_done.emit(True, "文档已上传，后续翻译/问答将携带该文档上下文")
+            self._cleanup_task()  # 停轮询 + drain 待发任务
+            self._status_ready()
+            self.upload_done.emit(
+                True, "文档已上传，后续翻译/问答将携带该文档上下文"
+                "（附件挂在当前会话，开启新会话后不再携带）")
             return
         if time.monotonic() > self._upload_deadline:
-            self._phase = "idle"
-            self._stop_poll()
+            self._cleanup_task()
+            self._status_ready()
             self.upload_done.emit(False, "上传超时——请打开网页窗口确认文件状态")
 
     # ---- 动作：贴图（真实键盘输入管线）----
@@ -741,6 +943,11 @@ class WebAIEngine(QObject):
         if self._phase != "pasting":
             return
         self._settle_clipboard()   # 立刻恢复用户剪贴板（图已进网页）
+        # 贴图使命完成：窗口是专为 isTrusted 键盘输入弹出的，收起不打扰；
+        # 流式回复走调用方弹窗（tag 信号链），追问时「在网页中继续」唤回
+        if self._win is not None and self._win.isVisible():
+            self._win.hide()
+            logger.info("web window hidden after paste (reply via popup)")
         self._do_fill()
 
     # ---- 新会话 ----
@@ -751,7 +958,11 @@ class WebAIEngine(QObject):
         url = d.get("url", "")
         if self.adapter.login_marker in url:
             self.login_required.emit()
+            self._drop_queued_with_signal()  # 作废待发任务必须发终止信号
             self._fail("网页版未登录")
+            self.session_ready.emit(False, "新会话开启失败：网页版未登录")
+            self._start_login_watch()  # fail 之后启动（其 _stop_poll 不杀监测）
+            self._status("未登录——请在窗口中登录")
             return
         # 判定成功：输入框可用 + 无回复残留 + 非流式（新会话是空画布）。
         # 不依赖根路径判断——DeepSeek 侧栏兜底成功后 url 是 /a/chat/s/<新id>。
@@ -761,16 +972,35 @@ class WebAIEngine(QObject):
                 and not d.get("streaming"):
             self._phase = "ready"
             self._stop_poll()
+            had_attachment = self._session_has_attachment
+            self._session_has_attachment = False
+            self._rounds = 0  # 新会话空画布：轮数与漂移提示重新计数
             logger.info("new session ready (url=%s)", url)
+            self._status_ready()
+            self.session_ready.emit(
+                True,
+                "会话已清空（文档附件不再携带）" if had_attachment
+                else "已开启新会话（上下文已清空）")
+            self._drain_queued()  # 新会话期间划的词此时发出
             return
         # 根导航被重定向回旧会话 → 侧栏兜底，只试一次（防循环点击）
         if not self._ns_attempted and time.monotonic() > self._ns_deadline - PAGE_LOAD_TIMEOUT_S + 5:
             self._ns_attempted = True
             self._run_js(self.adapter.NEW_SESSION, lambda r: logger.info("new-session fallback: %s", r))
         if time.monotonic() > self._ns_deadline:
-            self._phase = "idle" if self._phase == "loading" else self._phase
-            self._stop_poll()
-            logger.warning("new session not confirmed within timeout (url=%s)", url)
+            self._ns_timeout()
+
+    def _ns_timeout(self) -> None:
+        """新会话超时收尾：真实回报 session_ready(False) + 发出待发任务。
+
+        _tick 的超时分流与探测器内部共用本出口——只走一边。"""
+        logger.warning("new session not confirmed within timeout")
+        self._phase = "idle" if self._phase == "loading" else self._phase
+        self._status_ready()  # 收尾刷新状态（否则停在"开启新会话…"）
+        self._cleanup_task()  # stop + idle + drain：待发任务发到现有会话
+        self.session_ready.emit(
+            False, "新会话未确认（站点响应慢或改版）——上下文可能未清空，"
+            "可打开网页窗口手动确认")
 
     # ---- 读流式回复 ----
 
@@ -781,10 +1011,12 @@ class WebAIEngine(QObject):
         if text and text == self._reply_prev and not d.get("streaming"):
             self._stable += 1
         elif text != self._reply_prev:
+            # 流式有新文本 = 有进展：滚动续期，长译文不因总时长超时被误杀
+            self._deadline = time.monotonic() + STREAM_STALL_S
             if not self._reply_prev:
-                self.chunk.emit(text, self._task)  # 首块：popup 用它替换 loading 占位
+                self.chunk.emit(text, self._tag)  # 首块：popup 用它替换 loading 占位
             elif text.startswith(self._reply_prev):
-                self.chunk.emit(text[len(self._reply_prev):], self._task)
+                self.chunk.emit(text[len(self._reply_prev):], self._tag)
             # 非前缀扩展（站点重排/修正）不发 chunk：popup 只会追加渲染，
             # 全量重发会拼出脏文本——保持旧文不动，等 finished 全量覆盖纠正
             self._stable = 0

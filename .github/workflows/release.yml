@@ -1,18 +1,18 @@
 name: release
 
-# 发版 workflow：打 tag 触发 → 质量门禁 → 双变体 onedir 构建 → Inno Setup
-# 安装包 + 便携 zip → 上传 GitHub Release（共 4 资产）
+# 发版 workflow：打 tag 触发 → 质量门禁 → 单版本 onedir 构建 → Inno Setup
+# 安装包 + 便携 zip → 上传 GitHub Release（共 2 资产）
 #
 # 发版流程（版本号 bump 必须在打 tag 之前完成）：
 #   1. 改 app/__init__.py 的 __version__
-#   2. git commit && git tag v1.5.2 && git push origin main v1.5.2
-#   3. 本 workflow 自动产出：CtrlTranslate-Setup-*.exe（轻量安装包）
-#      CtrlTranslate-Web-Setup-*.exe（完整安装包）+ 两个便携 zip
+#   2. git commit && git tag v1.6.0 && git push origin main v1.6.0
+#   3. 本 workflow 自动产出：CtrlTranslate-Setup-*.exe（安装包）
+#      + CtrlTranslate-Portable-*.zip（便携版）
 #
 # workflow_dispatch 手动触发时 inputs.tagName 对应的 tag 必须已推送到远端
 # （release 用 gh CLI 挂在真实 tag 上，不凭空造 tag）。
 #
-# 与 tests.yml 区别：tests.yml 每次 push/PR 跑（pytest + lite 构建冒烟），
+# 与 tests.yml 区别：tests.yml 每次 push/PR 跑（pytest + 构建冒烟），
 # release.yml 只在打 tag 时跑（全量产物 + 上传）。
 
 on:
@@ -22,7 +22,7 @@ on:
   workflow_dispatch:
     inputs:
       tagName:
-        description: '发布 tag（形如 v1.5.2，须已推送）'
+        description: '发布 tag（形如 v1.6.0，须已推送）'
         required: true
         type: string
 
@@ -74,40 +74,33 @@ jobs:
           }
           exit $LASTEXITCODE
 
-      - name: Build lite variant (onedir)
+      - name: Build (onedir, WebEngine included)
         run: python -m PyInstaller --noconfirm --clean CtrlTranslate.spec
-
-      - name: Build web variant (onedir)
-        run: python -m PyInstaller --noconfirm --clean CtrlTranslate-Web.spec
 
       - name: Sanity check build outputs
         shell: pwsh
         run: |
           foreach ($p in @("dist\CtrlTranslate\CtrlTranslate.exe",
-                           "dist\CtrlTranslate-Web\CtrlTranslate-Web.exe",
-                           "dist\CtrlTranslate-Web\_internal\PySide6\QtWebEngineProcess.exe",
-                           "dist\CtrlTranslate-Web\_internal\PySide6\resources\icudtl.dat")) {
+                           "dist\CtrlTranslate\_internal\PySide6\QtWebEngineProcess.exe",
+                           "dist\CtrlTranslate\_internal\PySide6\resources\icudtl.dat")) {
             if (-not (Test-Path $p)) { throw "missing build output: $p" }
           }
 
       - name: Install Inno Setup
         run: choco install -y innosetup
 
-      - name: Build installers
+      - name: Build installer
         shell: pwsh
         run: |
           $iscc = Get-Command iscc -ErrorAction SilentlyContinue
           if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\iscc.exe" }
-          & $iscc "/DAppVersion=$env:APP_VERSION" /DVariant=lite installer\installer.iss
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-          & $iscc "/DAppVersion=$env:APP_VERSION" /DVariant=web installer\installer.iss
+          & $iscc "/DAppVersion=$env:APP_VERSION" installer\installer.iss
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
-      - name: Build portable zips
+      - name: Build portable zip
         shell: pwsh
         run: |
           Compress-Archive -Path dist\CtrlTranslate -DestinationPath "dist\CtrlTranslate-Portable-$env:APP_VERSION.zip"
-          Compress-Archive -Path dist\CtrlTranslate-Web -DestinationPath "dist\CtrlTranslate-Web-Portable-$env:APP_VERSION.zip"
 
       # gh CLI 为 runner 预装，避免引入第三方 release action 的供应链面
       - name: Upload release assets
@@ -122,7 +115,5 @@ jobs:
           fi
           gh release upload "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" \
             "dist/installer/CtrlTranslate-Setup-$APP_VERSION.exe" \
-            "dist/installer/CtrlTranslate-Web-Setup-$APP_VERSION.exe" \
             "dist/CtrlTranslate-Portable-$APP_VERSION.zip" \
-            "dist/CtrlTranslate-Web-Portable-$APP_VERSION.zip" \
             --clobber

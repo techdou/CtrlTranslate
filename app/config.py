@@ -124,6 +124,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "enabled": False,           # 网页版引擎（免费额度）：启用后划词/截图改走内嵌网页
         "site": "deepseek",         # 站点；当前仅 deepseek
         "auto_terms": True,         # 自动把【术语】段/术语解释收录进生词本（总开关）
+        "instruction_refresh_n": 8, # 同指令连续任务每 N 条强制重注入（防长会话格式漂移）
     },
     "tts": {
         "enabled": True,
