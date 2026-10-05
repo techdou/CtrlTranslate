@@ -42,13 +42,23 @@ def test_probe_and_send_js_are_wrapped():
 
 @pytest.fixture()
 def engine(qapp):
+    from PySide6.QtCore import QEventLoop, QTimer
+
     from app.core.webai import WebAIEngine
 
     eng = WebAIEngine()
     eng._phase = "idle"
     # 单测不把承载窗口弹到前台（_submit 现在会触发 present_window 抢焦点）
     eng.present_window = lambda: None
-    return eng
+    yield eng
+    # 未真实起过 Chromium 对象的测试 shutdown 是空操作；真实 _boot 过的测试
+    # （submit/preflight 未打桩 page 的用例）必须走生产的显式收尾：profile/page
+    # 留给解释器关闭期析构是退出阶段 access violation 的已知来源（CI 三连崩实证）。
+    # deleteLater 还需泵一次事件循环才真正析构。
+    eng.shutdown()
+    loop = QEventLoop()
+    QTimer.singleShot(50, loop.quit)
+    loop.exec()
 
 
 def test_submit_rejected_when_busy(engine):
