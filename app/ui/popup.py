@@ -2,7 +2,10 @@
 
 交互契约：
 - show_translation(source) 后由 Translator 信号驱动 on_chunk/on_done/on_error
-- Esc 关闭；点击其他应用（本应用整体失活）自动关闭；「钉住」后不自动关
+- Esc 关闭；点击其他应用自动关闭；「钉住」后不自动关
+  关窗双路：ApplicationDeactivate 失焦事件（快路）+ 前台窗口切换监视 _on_fg_tick
+  （兜底路）——热键弹出时 Windows 前台锁拒绝 activateWindow，应用从未激活，
+  失焦事件不会触发，首次点击外部只能靠前台监视捕获（见 _on_fg_tick 注释）
 - 按钮：读原文 / 读译文 / 收藏 / 复制 / 重试（关闭由 Esc 与失焦覆盖，不设按钮）
 - 朗读中的按钮变为「停止」，再点即停
 - 错误态：错误文案进正文区（可选中复制），无关按钮隐藏
@@ -15,9 +18,13 @@
 
 from __future__ import annotations
 
+import ctypes
 import html
 import logging
 import math
+import os
+import sys
+from ctypes import wintypes
 
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QCursor, QGuiApplication, QTextCursor, QTextOption
@@ -41,12 +48,28 @@ from app.ui.widgets import IconButton
 
 logger = logging.getLogger("ctrltrans.popup")
 
+# 「点击其他程序关窗」兜底路依赖的 Win32 前台查询；非 Windows 仅保导入可测
+if sys.platform == "win32":
+    _user32 = ctypes.windll.user32
+    _user32.GetForegroundWindow.restype = wintypes.HWND
+    _user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, wintypes.LPDWORD]
+else:
+    _user32 = None
+
 SOURCE_PREVIEW_LIMIT = 120
 # 弹窗离锚点的偏移 + SHADOW.margin 一起构成视觉间距（此前无阴影边距时是 24）
 CURSOR_OFFSET = 12
 RESULT_GROW_RATIO = 0.45  # 译文区高度上限 = 锚点屏可用高度的比例；小屏 120px 兜底
 WINDOW_MAX_AVAIL_RATIO = 0.6  # 整窗高度上限 = 锚点屏可用高度的比例
 GROW_THROTTLE_MS = 300  # 流式输出期间窗口跟随长高的最小间隔，防逐 chunk 抖动
+FG_WATCH_MS = 200  # 前台切换监视轮询间隔：点击外部后至此内关闭，感知即时
+
+
+def _fg_pid(hwnd: int) -> int:
+    """前台窗口归属进程 pid（仅 win32 运行路径调用）。"""
+    pid = wintypes.DWORD()
+    _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    return pid.value
 
 
 def _derived_fs(fs: int) -> tuple[int, int]:
@@ -108,6 +131,12 @@ class TranslatePopup(QWidget):
         self._terms_timer = QTimer(self)
         self._terms_timer.setSingleShot(True)
         self._terms_timer.timeout.connect(self._append_terms)
+        # 「点击其他程序关窗」兜底路：可见期间低频监视前台窗口切换，
+        # 与 eventFilter 的 ApplicationDeactivate 互为快慢双路（_on_fg_tick）
+        self._fg_watch_timer = QTimer(self)
+        self._fg_watch_timer.setInterval(FG_WATCH_MS)
+        self._fg_watch_timer.timeout.connect(self._on_fg_tick)
+        self._fg_prev = 0  # 前台句柄基线：首个 tick 建立，之后仅句柄变化时判定
 
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_DeleteOnClose, False)
@@ -375,15 +404,17 @@ class TranslatePopup(QWidget):
     def close_animated(self) -> None:
         """全部关闭路径的统一出口：淡出后才 hide()。
 
-        动画期间被再次 show_animated 会 stop 本动画；连续触发则从当前
-        透明度续淡。stop() 不触发 finished，done=hide 不会误执行。"""
+        幂等：淡出进行中重复的关闭请求直接忽略（失焦事件与前台监视双路
+        几乎必然先后到达，重启淡出会把关闭拉长 ≤ 一个轮询间隔）。
+        动画期间被再次 show_animated 会 stop 本动画并清空句柄，不冲突；
+        stop() 不触发 finished，done=hide 不会误执行。"""
         if not self.isVisible():
+            return
+        if self._close_anim is not None:
             return
         if self._show_anim is not None:
             self._show_anim.stop()
             self._show_anim = None
-        if self._close_anim is not None:
-            self._close_anim.stop()
         start = self.windowOpacity()
         if start <= 0.01:  # 已近乎不可见（如被中断在半途），直接收
             self.hide()
@@ -911,6 +942,7 @@ class TranslatePopup(QWidget):
     def eventFilter(self, obj, event) -> bool:
         # 点击其他应用（本应用整体失活）→ 关闭弹窗（钉住时除外）。
         # 设置等本应用窗口间的切换不会触发 ApplicationDeactivate，安全。
+        # 仅覆盖「曾激活过」的场景；热键弹出未激活时由 _on_fg_tick 兜底。
         if (
             obj == QApplication.instance()
             and event.type() == QEvent.ApplicationDeactivate
@@ -920,12 +952,44 @@ class TranslatePopup(QWidget):
             self.close_animated()
         return super().eventFilter(obj, event)
 
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if _user32 is not None:
+            self._fg_prev = 0
+            self._fg_watch_timer.start()
+            # show 瞬间立即建基线（prev==0 分支只记录不关）：若等首个 tick
+            # （200ms 后）才建，期间用户点击外部会被当新基线记下而漏关——
+            # 盲区内首次点击即失效，正是本监视要根除的原始 bug 形态。
+            self._on_fg_tick()
+
+    def _on_fg_tick(self) -> None:
+        """前台切换检测：前台句柄变化且新前台不属于本进程 → 未钉住即关。
+
+        为什么需要这条路：热键在后台进程触发，Windows 前台锁会静默拒绝
+        activateWindow()，应用从未激活过——ApplicationDeactivate 这个
+        「激活→失活」边沿事件在首次点击外部时不会发出，弹窗因此关不掉
+        （用户须先点一下弹窗激活它）。前台句柄变化是更底层的信号，与
+        应用激活与否无关，首次点击即可捕获。
+
+        语义与失焦路同构：切到本进程窗口（弹窗自身/设置/词库）不关，
+        用户不动（前台无变化）不关；拿不到前台（锁屏等过渡态）跳过。
+        """
+        hwnd = _user32.GetForegroundWindow()
+        if not hwnd or hwnd == self._fg_prev:
+            return
+        prev, self._fg_prev = self._fg_prev, hwnd
+        if prev == 0 or self._pinned:
+            return  # 基线缺失仅记录；钉住不受外部切换影响
+        if _fg_pid(hwnd) != os.getpid():
+            self.close_animated()
+
     def hideEvent(self, event) -> None:
         self._auto_close_timer.stop()
         self._status_timer.stop()
         self._loading_timer.stop()
         self._grow_timer.stop()
         self._terms_timer.stop()
+        self._fg_watch_timer.stop()
         self._tts.stop()
         # 在途动画全部终止（stop 不触发 finished，无误回调），句柄清空
         for attr in ("_show_anim", "_close_anim", "_grow_anim",
