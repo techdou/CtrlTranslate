@@ -31,6 +31,7 @@ NOTES.md
 # AI 编码工具本地配置 / 会话状态（兜底，防误提交）
 .claude/
 .zcode/
+.zcodeignore
 .cursor/
 .windsurf/
 .agents/
@@ -41,6 +42,9 @@ AGENTS.md
 .claude*
 .v2c/
 .video_agent/
+
+# 项目内存档快照（大体积 zip 不入 git，见 archive/ 约定）
+archive/
 
 # 本地用户数据 / 运行时产物（真实数据只存 ~/.ctrltrans/）
 *.db
