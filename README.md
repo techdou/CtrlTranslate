@@ -144,6 +144,16 @@ git push origin main v1.6.0
 - **v1.1.0**（2026-09-07）——备用翻译服务自动切换、翻译缓存、术语 ☆ 收藏、来源筛选、自动检查更新
 - **v1.0.0**（2026-09-06）——首个版本：双击 Ctrl 划词、流式翻译、学习模式术语表、语音播报、生词本与历史
 
+## 代码签名
+
+Windows 发行资产（安装包与便携版内的可执行文件）由 [SignPath Foundation](https://signpath.org) 提供的免费代码签名证书签名，签名服务由 [SignPath.io](https://about.signpath.io) 提供，通过 GitHub Actions 可信构建流水线（`release.yml`）自动完成——签名的二进制与仓库源码一一对应，可溯源到触发构建的 tag。
+
+**签名政策**
+
+- 角色分工（单人项目，均由仓库所有者 [techdou](https://github.com/techdou) 担任）：Authors（可信提交者）= Reviewers（外部贡献审查者）= Approvers（签名请求批准者）
+- 仅对从本仓库 `main` 分支打出的 tag 构建产物签名；每次发布签名均经人工批准
+- **隐私声明**：CtrlTranslate 是纯本地工具，不收集、不上传任何用户数据；API Key、配置与历史仅存于本机（WebDAV 备份由用户主动配置、直连用户自己的网盘），无遥测、无埋点
+
 ## License
 
 本项目基于 [MIT License](LICENSE) 协议开源。

@@ -1,7 +1,8 @@
 name: release
 
-# 发版 workflow：打 tag 触发 → 质量门禁 → 单版本 onedir 构建 → Inno Setup
-# 安装包 + 便携 zip → 上传 GitHub Release（共 2 资产）
+# 发版 workflow：打 tag 触发 → 质量门禁 → 单版本 onedir 构建 → SignPath
+# 代码签名（如已配置）→ Inno Setup 安装包 + 便携 zip → 安装包签名 →
+# 上传 GitHub Release（共 2 资产）
 #
 # 发版流程（版本号 bump 必须在打 tag 之前完成）：
 #   1. 改 app/__init__.py 的 __version__
@@ -86,6 +87,38 @@ jobs:
             if (-not (Test-Path $p)) { throw "missing build output: $p" }
           }
 
+      # ── SignPath 代码签名（core exe）─────────────────────────────────────
+      # 未配置 SIGNPATH_ORGANIZATION_ID（申请未批/未配置）时整段自动跳过，
+      # 流水线退回无签名直传行为；配置指南见 docs/signpath-setup.md。
+      # release-signing 策略需人工审批：本步骤会挂起等 SignPath 网页批准
+      #（发版时留意邮件通知），job 上限 6 小时。
+      - name: SignPath upload core exe (unsigned)
+        if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        id: sp-upload-core
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctrltranslate-core-unsigned
+          if-no-files-found: error
+          path: dist/CtrlTranslate/CtrlTranslate.exe
+
+      - name: SignPath sign core exe
+        if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: 'CtrlTranslate'
+          signing-policy-slug: 'release-signing'
+          github-artifact-id: ${{ steps.sp-upload-core.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: dist-signed-core
+
+      # 签名后的 exe 覆盖回 onedir——安装包与便携 zip 内的主程序即带签名
+      - name: SignPath replace core exe
+        if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        shell: pwsh
+        run: Copy-Item "dist-signed-core\CtrlTranslate.exe" "dist\CtrlTranslate\CtrlTranslate.exe" -Force
+
       - name: Install Inno Setup
         run: choco install -y innosetup
 
@@ -101,6 +134,35 @@ jobs:
         shell: pwsh
         run: |
           Compress-Archive -Path dist\CtrlTranslate -DestinationPath "dist\CtrlTranslate-Portable-$env:APP_VERSION.zip"
+
+      # ── SignPath 代码签名（安装包）─────────────────────────────────────
+      # 安装包在「主程序已签名」的基础上打出，本段只补 Setup.exe 自身的签名
+      #（SmartScreen 拦的就是这个文件）；同样需人工审批，未配置时跳过。
+      - name: SignPath upload installer (unsigned)
+        if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        id: sp-upload-installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctrltranslate-installer-unsigned
+          if-no-files-found: error
+          path: dist/installer/CtrlTranslate-Setup-${{ env.APP_VERSION }}.exe
+
+      - name: SignPath sign installer
+        if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: 'CtrlTranslate'
+          signing-policy-slug: 'release-signing'
+          github-artifact-id: ${{ steps.sp-upload-installer.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: dist-signed-installer
+
+      - name: SignPath replace installer
+        if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        shell: pwsh
+        run: Copy-Item "dist-signed-installer\CtrlTranslate-Setup-$env:APP_VERSION.exe" "dist\installer\CtrlTranslate-Setup-$env:APP_VERSION.exe" -Force
 
       # gh CLI 为 runner 预装，避免引入第三方 release action 的供应链面
       - name: Upload release assets
